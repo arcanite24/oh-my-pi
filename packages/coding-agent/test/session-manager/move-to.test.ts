@@ -85,6 +85,30 @@ describe("SessionManager.moveTo", () => {
 		await fsp.rm(testAgentDir, { recursive: true, force: true });
 	});
 
+	it("refuses relocation into another runtime's transcript before moving either file", async () => {
+		const session = SessionManager.create(cwdA);
+		await session.acquireOwnership();
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const source = session.getSessionFile()!;
+		const targetDir = path.join(testAgentDir, "occupied");
+		await fsp.mkdir(targetDir);
+		const target = path.join(targetDir, path.basename(source));
+		await fsp.copyFile(source, target);
+		const occupant = await SessionManager.open(target);
+		await occupant.acquireOwnership();
+		const original = await fsp.readFile(target, "utf8");
+		try {
+			await expect(session.moveTo(cwdB, targetDir)).rejects.toThrow("Session is busy");
+			expect(session.getSessionFile()).toBe(source);
+			expect(await fsp.readFile(source, "utf8")).toBe(original);
+			expect(await fsp.readFile(target, "utf8")).toBe(original);
+		} finally {
+			await occupant.close();
+			await session.close();
+		}
+	});
+
 	it("moves session file and updates header cwd (baseline)", async () => {
 		const session = SessionManager.create(cwdA);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });

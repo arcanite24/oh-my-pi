@@ -1642,6 +1642,9 @@ export class SessionManager {
 		if (this.#persist && this.#sessionFile) {
 			const source = this.#sessionFile;
 			const dest = path.join(nextSessionDir, path.basename(source));
+			this.#storage.ensureDirSync(nextSessionDir);
+			this.#claimSessionFile(source);
+			this.#claimSessionFile(dest);
 			this.#sessionFileRelocating = { source, dest };
 		}
 
