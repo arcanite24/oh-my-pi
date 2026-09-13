@@ -77,6 +77,7 @@
     "sherpa-onnx-node": "1.13.2"
   },
   "devDependencies": {
+    "@opencode-ai/sdk": "1.18.30",
     "@types/bun": "catalog:"
   },
   "engines": {

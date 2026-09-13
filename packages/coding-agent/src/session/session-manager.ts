@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { FileLock } from "@oh-my-pi/pi-natives";
 import type {
 	ImageContent,
 	Message,
@@ -521,6 +522,69 @@ export class SessionManager {
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
+	static #fileOwners = new Map<string, WeakRef<SessionManager>>();
+	// ponytail: retain leases across session moves until close; release old paths earlier if long-lived switching needs it.
+	#fileLeases = new Map<string, FileLock>();
+	#closedFileRevisions = new Map<string, string>();
+	#ownsSession = false;
+
+	/** Runtime ownership is separate from lock-free transcript inspection. */
+	async acquireOwnership(): Promise<void> {
+		if (this.#ownsSession) return;
+		this.#ownsSession = true;
+		const file = this.#sessionFile;
+		try {
+			if (file) {
+				this.#claimSessionFile(file, true);
+				if (this.#storage.existsSync(file)) await this.#setSessionFile(file);
+			}
+		} catch (error) {
+			this.#releaseSessionFiles();
+			this.#ownsSession = false;
+			throw error;
+		}
+	}
+
+	#fileRevision(file: string): string {
+		try {
+			const stat = fs.statSync(file);
+			return `${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+		} catch (error) {
+			if (isEnoent(error)) return "missing";
+			throw error;
+		}
+	}
+
+	#claimSessionFile(file: string, reloading = false): void {
+		if (!this.#ownsSession || !this.#persist || !(this.#storage instanceof FileSessionStorage)) return;
+		const resolved = path.resolve(file);
+		const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+		if (this.#fileLeases.has(key)) return;
+		const owner = SessionManager.#fileOwners.get(key)?.deref();
+		if (owner && owner !== this) throw new Error("Session is busy in another agent; wait for its writer to close");
+		const lease = FileLock.tryAcquire(`${key}.writer.lock`);
+		if (!lease.acquired) throw new Error("Session is busy in another process; wait for its writer to close");
+		const previous = this.#closedFileRevisions.get(key);
+		if (!reloading && previous !== undefined && previous !== this.#fileRevision(resolved)) {
+			lease.release();
+			throw new Error("Session changed after close; reopen it before writing");
+		}
+		this.#closedFileRevisions.delete(key);
+		this.#fileLeases.set(key, lease);
+		SessionManager.#fileOwners.set(key, new WeakRef(this));
+	}
+
+	#releaseSessionFiles(): void {
+		for (const [file, lease] of this.#fileLeases) {
+			try {
+				this.#closedFileRevisions.set(file, this.#fileRevision(file));
+			} finally {
+				SessionManager.#fileOwners.delete(file);
+				lease.release();
+			}
+		}
+		this.#fileLeases.clear();
+	}
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -804,6 +868,7 @@ export class SessionManager {
 
 	#appendWriter(): SessionStorageWriter {
 		if (!this.#sessionFile) throw new Error("Cannot open a session writer before a session file exists");
+		this.#claimSessionFile(this.#sessionFile);
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
@@ -872,6 +937,7 @@ export class SessionManager {
 		if (!targetPath) return;
 
 		try {
+			this.#claimSessionFile(targetPath);
 			const body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
@@ -944,6 +1010,7 @@ export class SessionManager {
 				await this.#closeWriterHandle();
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
+				this.#claimSessionFile(sessionFile);
 				if (this.#diskEpoch !== epoch) return false;
 				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
 					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
@@ -1414,6 +1481,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
+		this.#claimSessionFile(resolvedSessionFile, true);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		if (loaded.invalidHeader) {
 			throw new Error(
@@ -1880,6 +1948,7 @@ export class SessionManager {
 		// tail) to become durable so a graceful shutdown does not exit while
 		// a fire-and-forget publish is still on the wire.
 		await this.#storage.drain();
+		this.#releaseSessionFiles();
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -2231,6 +2300,7 @@ export class SessionManager {
 	 */
 	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
 		if (this.#released) return false;
+		if (this.#sessionFile) this.#claimSessionFile(this.#sessionFile);
 		if (this.#titleSource === "user" && source === "auto") return false;
 
 		const title = SessionManager.#cleanTitle(name);

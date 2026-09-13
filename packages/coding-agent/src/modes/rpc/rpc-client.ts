@@ -59,6 +59,8 @@ export interface RpcAgentProcess {
 }
 
 export interface RpcClientOptions {
+	/** Enable tool questions and approvals over the RPC UI protocol. */
+	ui?: boolean;
 	/** Path to the CLI entry point (default: `dist/cli.js`). */
 	cliPath?: string;
 	/**
@@ -284,6 +286,8 @@ export class RpcClient {
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
+	#promptResultListeners = new Set<(agentInvoked: boolean) => void>();
+	#failureListeners = new Set<(kind: "prompt" | "transport", poolMessage?: string) => void>();
 	#abortController = new AbortController();
 
 	constructor(private options: RpcClientOptions = {}) {
@@ -310,7 +314,7 @@ export class RpcClient {
 		this.#protocolVersion = 1;
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
-		const args = ["--mode", "rpc"];
+		const args = ["--mode", this.options.ui ? "rpc-ui" : "rpc"];
 
 		if (this.options.provider) {
 			args.push("--provider", this.options.provider);
@@ -362,6 +366,7 @@ export class RpcClient {
 			}
 			await this.#waitForExit(child);
 			for (const request of pendingRequests) request.reject(error);
+			for (const listener of this.#failureListeners) listener("transport");
 		};
 
 		// Process lines in background, intercepting the ready signal.
@@ -422,8 +427,16 @@ export class RpcClient {
 
 		// Also race against process exit (in case stdout closes before we read it)
 		void child.exited.then(
-			(exitCode: number) => {
-				if (readySettled) return;
+			async (exitCode: number) => {
+				if (readySettled) {
+					// Windows can report process exit without promptly ending the stdout reader.
+					// Allow queued final responses to drain, then settle outstanding requests.
+					await Bun.sleep(100);
+					await reapAfterOutputFailure(
+						new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`),
+					);
+					return;
+				}
 				readySettled = true;
 				readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`));
 			},
@@ -523,6 +536,18 @@ export class RpcClient {
 		};
 	}
 
+	/** Forward interactive requests to an embedding browser or other RPC host. */
+	onExtensionUiRequest(listener: (request: RpcExtensionUIRequest) => void): () => void {
+		this.#extensionUiListeners.add(listener);
+		return () => {
+			this.#extensionUiListeners.delete(listener);
+		};
+	}
+
+	respondToExtensionUi(response: RpcExtensionUIResponse): void {
+		this.#writeFrame(response);
+	}
+
 	/**
 	 * Subscribe to all top-level session events, including non-core session state events.
 	 */
@@ -591,7 +616,26 @@ export class RpcClient {
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "prompt", message, images });
+		const response = await this.#send({ type: "prompt", message, images });
+		if (!response.success) throw new RpcCommandError(response.error, response.command, response.code);
+		if (response.command === "prompt" && response.success && response.data) {
+			for (const listener of this.#promptResultListeners) listener(response.data.agentInvoked);
+		}
+	}
+
+	onPromptResult(listener: (agentInvoked: boolean) => void): () => void {
+		this.#promptResultListeners.add(listener);
+		return () => {
+			this.#promptResultListeners.delete(listener);
+		};
+	}
+
+	/** Late prompt failures and worker loss after the initial acknowledgement. */
+	onFailure(listener: (kind: "prompt" | "transport", poolMessage?: string) => void): () => void {
+		this.#failureListeners.add(listener);
+		return () => {
+			this.#failureListeners.delete(listener);
+		};
 	}
 
 	/**
@@ -697,6 +741,10 @@ export class RpcClient {
 	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
 		const response = await this.#send({ type: "set_model", provider, modelId });
 		return this.#getData(response);
+	}
+
+	async setSessionName(name: string): Promise<void> {
+		await this.#send({ type: "set_session_name", name });
 	}
 
 	/**
@@ -1055,6 +1103,10 @@ export class RpcClient {
 	// =========================================================================
 
 	#handleLine(data: unknown): void {
+		if (isRecord(data) && data.type === "prompt_result" && typeof data.agentInvoked === "boolean") {
+			for (const listener of this.#promptResultListeners) listener(data.agentInvoked);
+			return;
+		}
 		// Check if it's a response to a pending request
 		if (isRpcResponse(data)) {
 			const id = data.id;
@@ -1062,6 +1114,11 @@ export class RpcClient {
 				const pending = this.#pendingRequests.get(id)!;
 				this.#pendingRequests.delete(id);
 				pending.resolve(data);
+				return;
+			}
+			if (data.command === "prompt" && !data.success) {
+				for (const listener of this.#failureListeners)
+					listener("prompt", data.code === "credential_pool_exhausted" ? data.error : undefined);
 				return;
 			}
 		}

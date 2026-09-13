@@ -15,6 +15,23 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("RpcClient lifecycle (issue #4079 B)", () => {
+	test("rejects a prompt refused before acknowledgement", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env: { MOCK_RPC_PROMPT_ERROR: "1" } });
+		await client.start();
+		const error = await client.prompt("test").then(
+			() => null,
+			(error: unknown) => String(error),
+		);
+		expect(error).toBe("RpcCommandError: fixture prompt rejected");
+	});
+	test("reports prompt failures arriving after acknowledgement", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env: { MOCK_RPC_LATE_PROMPT_ERROR: "1" } });
+		const failure = Promise.withResolvers<string>();
+		client.onFailure(kind => failure.resolve(kind));
+		await client.start();
+		await client.prompt("test");
+		expect(await failure.promise).toBe("prompt");
+	});
 	test("auto-negotiates protocol v2 and reassembles an oversized response", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
@@ -50,7 +67,12 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		});
 
 		await client.start();
-		await expect(client.getMessagesPage()).rejects.toThrow("Cannot page messages while the session is changing");
+		// Await pipe I/O before entering Bun's rejection matcher (which can starve it on Windows).
+		const pageError = await client.getMessagesPage().then(
+			() => null,
+			(error: unknown) => String(error),
+		);
+		expect(pageError).toBe("RpcCommandError: Cannot page messages while the session is changing");
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
 		]);
@@ -66,9 +88,11 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		// Direct page walks stay strict: the stale cursor is surfaced to the caller.
 		const firstPage = await client.getMessagesPage();
 		expect(firstPage.nextCursor).toBe("second-page");
-		await expect(client.getMessagesPage({ cursor: firstPage.nextCursor })).rejects.toThrow(
-			"RPC message cursor is stale",
+		const pageError = await client.getMessagesPage({ cursor: firstPage.nextCursor }).then(
+			() => null,
+			(error: unknown) => String(error),
 		);
+		expect(pageError).toBe("RpcCommandError: RPC message cursor is stale");
 		// The high-level drain discards the partial first page and takes the legacy snapshot.
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
@@ -180,6 +204,7 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 	}, 10_000);
 
 	test("reports exit code and stderr when a ready worker exits", async () => {
+		const failures: string[] = [];
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
 			env: {
@@ -187,10 +212,12 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 				MOCK_RPC_EXIT_STDERR: "fixture worker failed",
 			},
 		});
+		client.onFailure(kind => failures.push(kind));
 		await client.start();
 
 		await expect(client.getState()).rejects.toThrow(
 			"Agent process exited with code 23. Stderr: fixture worker failed",
 		);
+		expect(failures).toEqual(["transport"]);
 	});
 });

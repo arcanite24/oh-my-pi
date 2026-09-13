@@ -87,6 +87,8 @@ export interface SubagentEventPayload {
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
 	id: string;
+	/** Registry identity of the spawning agent, for nested runtime clients. */
+	parentAgentId?: string;
 	agent: string;
 	agentSource: AgentSource;
 	description?: string;

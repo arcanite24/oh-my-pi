@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import { CredentialPoolExhaustedError } from "@oh-my-pi/pi-ai/auth/credential-pool";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -334,7 +335,7 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 export interface RpcInputFrameDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
-	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	errorResponse: (id: string | undefined, command: string, message: string, code?: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
@@ -475,7 +476,14 @@ export class RpcInputDispatcher {
 			if (awaited) await awaited;
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.#deps.output(this.#deps.errorResponse(command.id, command.type, message));
+			this.#deps.output(
+				this.#deps.errorResponse(
+					command.id,
+					command.type,
+					message,
+					err instanceof CredentialPoolExhaustedError ? "credential_pool_exhausted" : undefined,
+				),
+			);
 		} finally {
 			await this.#afterSerialCommand?.();
 		}
@@ -1121,7 +1129,15 @@ export async function runRpcMode(
 					message: command.message,
 					streamingBehavior: command.streamingBehavior,
 					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
+					onError: promptError =>
+						output(
+							error(
+								id,
+								"prompt",
+								promptError.message,
+								promptError instanceof CredentialPoolExhaustedError ? "credential_pool_exhausted" : undefined,
+							),
+						),
 					extensionUserMessageTracker,
 				});
 				if (skillResult) {
@@ -1149,7 +1165,17 @@ export async function runRpcMode(
 							id,
 							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
 							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
+							onError: promptError =>
+								output(
+									error(
+										id,
+										"prompt",
+										promptError.message,
+										promptError instanceof CredentialPoolExhaustedError
+											? "credential_pool_exhausted"
+											: undefined,
+									),
+								),
 							extensionUserMessageTracker,
 						});
 						return success(id, "prompt");
@@ -1172,7 +1198,15 @@ export async function runRpcMode(
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
+					onError: promptError =>
+						output(
+							error(
+								id,
+								"prompt",
+								promptError.message,
+								promptError instanceof CredentialPoolExhaustedError ? "credential_pool_exhausted" : undefined,
+							),
+						),
 					extensionUserMessageTracker,
 				});
 				return success(id, "prompt");

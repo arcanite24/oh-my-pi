@@ -3635,6 +3635,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Emit lifecycle start event
 			const startedPayload = {
 				id,
+				parentAgentId: options.parentAgentId,
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
 				detached: options.detached,

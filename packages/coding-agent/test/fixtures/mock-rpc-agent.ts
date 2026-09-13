@@ -94,6 +94,26 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (frame.type === "prompt" && Bun.env.MOCK_RPC_PROMPT_ERROR === "1") {
+				writeFrame({ id, type: "response", command: "prompt", success: false, error: "fixture prompt rejected" });
+				continue;
+			}
+			if (frame.type === "prompt" && Bun.env.MOCK_RPC_LATE_PROMPT_ERROR === "1") {
+				writeFrame({ id, type: "response", command: "prompt", success: true });
+				setTimeout(
+					() =>
+						writeFrame({
+							id,
+							type: "response",
+							command: "prompt",
+							success: false,
+							error: "fixture quota failure",
+							code: Bun.env.MOCK_RPC_LATE_PROMPT_CODE,
+						}),
+					10,
+				);
+				continue;
+			}
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
 				writeFrame({
 					id,
