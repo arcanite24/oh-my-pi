@@ -106,12 +106,20 @@ pub(crate) struct Host {
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
 	stdin_is_search_input: bool,
+	stdout_file:           Option<same_file::Handle>,
 	/// The shared stdout/stderr writer when both fds point at one
 	/// destination; `None` when they diverge.
 	merged_out:            Option<Arc<Mutex<StreamWriter>>>,
 	/// Emulated SIGPIPE state shared with every guarded stream handed out by
 	/// this host; see [`Sigpipe`].
 	sigpipe:               Arc<Sigpipe>,
+}
+
+fn file_handle(file: &OpenFile) -> Option<same_file::Handle> {
+	let OpenFile::File(file) = file else {
+		return None;
+	};
+	same_file::Handle::from_file(file.try_clone().ok()?).ok()
 }
 
 /// Exit status of a process killed by SIGPIPE (128 + 13).
@@ -284,6 +292,13 @@ impl Host {
 	/// decide between searching stdin and searching `.`.
 	pub const fn stdin_is_search_input(&self) -> bool {
 		self.stdin_is_search_input
+	}
+
+	/// Whether `path` names the regular file currently receiving stdout.
+	pub fn is_stdout_file(&self, path: &Path) -> bool {
+		self.stdout_file.as_ref().is_some_and(|stdout| {
+			same_file::Handle::from_path(path).is_ok_and(|candidate| candidate == *stdout)
+		})
 	}
 
 	/// Records a non-zero exit status while processing continues (the
@@ -1012,6 +1027,7 @@ fn build_host<SE: ShellExtensions>(
 	let cancel = Arc::new(AtomicBool::new(false));
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
+	let stdout_file = file_handle(&stdout);
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
 	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
@@ -1042,6 +1058,7 @@ fn build_host<SE: ShellExtensions>(
 		cancel,
 		exit_code: 0,
 		stdin_is_search_input,
+		stdout_file,
 		merged_out,
 		sigpipe,
 	})
@@ -1226,6 +1243,7 @@ mod testing {
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,
+				stdout_file:           None,
 				merged_out:            None,
 				sigpipe,
 			};

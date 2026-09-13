@@ -20,6 +20,7 @@ export type MCPFailureClass =
 	| "unknown";
 
 interface MCPTransportErrorOptions {
+	oauthChallenge?: { wwwAuthenticate: string | null; authServer: string | null };
 	transport: MCPTransportKind;
 	stage: MCPFailureStage;
 	failure: MCPFailureClass;
@@ -32,6 +33,30 @@ interface MCPTransportErrorOptions {
 }
 
 const MAX_MESSAGE_CHARS = 1_000;
+
+export function mcpHttpStatusError(
+	response: Response,
+	body: string,
+	stage: MCPFailureStage,
+	traceId?: string,
+): MCPTransportError {
+	return new MCPTransportError({
+		transport: "http",
+		stage,
+		failure: "http_status",
+		message: `HTTP ${response.status}: ${body}`,
+		code: response.status,
+		traceId,
+		retryable: response.status === 404 || response.status === 502 || response.status === 503,
+		oauthChallenge:
+			response.status === 401 || response.status === 403
+				? {
+						wwwAuthenticate: response.headers.get("WWW-Authenticate"),
+						authServer: response.headers.get("Mcp-Auth-Server"),
+					}
+				: undefined,
+	});
+}
 const MAX_DATA_CHARS = 2_000;
 const MAX_TRACE_ID_CHARS = 128;
 const MAX_DATA_STRING_CHARS = 256;
@@ -47,6 +72,10 @@ const SECRET_KEY =
 const TRACE_KEYS = /^(?:trace[-_]?id|request[-_]?id|correlation[-_]?id|traceparent)$/i;
 
 export class MCPTransportError extends Error {
+	#oauthChallenge?: { wwwAuthenticate: string | null; authServer: string | null };
+	getOAuthChallenge() {
+		return this.#oauthChallenge;
+	}
 	/** Transport implementation handling the failed operation. */
 	readonly transport: MCPTransportKind;
 	/** Protocol stage reached before failure. */
@@ -68,6 +97,7 @@ export class MCPTransportError extends Error {
 			options.cause === undefined ? undefined : { cause: options.cause },
 		);
 		this.name = "MCPTransportError";
+		this.#oauthChallenge = options.oauthChallenge;
 		this.transport = options.transport;
 		this.stage = options.stage;
 		this.failure = options.failure;

@@ -151,7 +151,7 @@ describe("FileSessionStorage writer", () => {
 		await expect(writer.close()).rejects.toThrow("disk full");
 	});
 
-	it("rolls back bytes from a partial append before surfacing the error", () => {
+	it("rolls back bytes from a partial append before surfacing the error", async () => {
 		const sessionPath = path.join(tempDir, "partial-append.jsonl");
 		fs.writeFileSync(sessionPath, "complete\n");
 		const writer = storage.openWriter(sessionPath);
@@ -167,6 +167,23 @@ describe("FileSessionStorage writer", () => {
 		if (!appendSync) throw new Error("File writer must expose appendSync");
 		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+		await expect(writer.close()).rejects.toThrow("ENOSPC");
+	});
+
+	it("does not truncate a replacement session when a failed append rolls back", async () => {
+		const sessionPath = path.join(tempDir, "replaced.jsonl");
+		fs.writeFileSync(sessionPath, "original\n");
+		const writer = storage.openWriter(sessionPath);
+		vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			fs.renameSync(sessionPath, `${sessionPath}.old`);
+			fs.writeFileSync(sessionPath, "replacement transcript\n");
+			throw new Error("disk full");
+		});
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("failed entry\n")).toThrow();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement transcript\n");
+		await expect(writer.close()).rejects.toThrow();
 	});
 });
 

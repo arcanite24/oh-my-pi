@@ -496,6 +496,7 @@ impl GitRepo {
 			let Some(root) = dotgit.parent().map(Path::to_owned) else {
 				continue;
 			};
+			let root = std::fs::canonicalize(&root).unwrap_or(root);
 			let head = parse_head_with_refs(&dir.join("HEAD"), &self.info().common_dir)?;
 			out.push(entry_from_head(root, &head));
 		}
@@ -1248,6 +1249,7 @@ mod tests {
 		git(dir.path(), &["init", "-b", "main"])?;
 		git(dir.path(), &["config", "user.name", "Test User"])?;
 		git(dir.path(), &["config", "user.email", "test@example.com"])?;
+		git(dir.path(), &["config", "core.autocrlf", "false"])?;
 		let repo = GitRepo::require(dir.path())?;
 		Ok((dir, repo))
 	}

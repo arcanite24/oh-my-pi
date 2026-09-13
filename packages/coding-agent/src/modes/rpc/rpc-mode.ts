@@ -11,6 +11,10 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import { getLspStatus } from "../../lsp/servers";
+import { MCPManager } from "../../mcp/manager";
+import { reloadMCPTools } from "../../mcp/loader";
+import { isMCPToolName } from "../../tools/builtin-names";
 import { CredentialPoolExhaustedError } from "@oh-my-pi/pi-ai/auth/credential-pool";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -1291,6 +1295,47 @@ export async function runRpcMode(
 
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
+			}
+			case "get_mcp_status": {
+				const manager = MCPManager.instance();
+				return success(id, "get_mcp_status", {
+					managerAvailable: manager !== undefined,
+					registeredTools: session.getAllToolNames().filter(isMCPToolName),
+					servers:
+						manager?.getAllServerNames().map(name => ({ name, status: manager.getConnectionStatus(name) })) ?? [],
+				});
+			}
+			case "get_lsp_status":
+				return success(id, "get_lsp_status", getLspStatus());
+			case "reload_mcp": {
+				const manager = MCPManager.instance();
+				if (!manager) throw new Error("MCP is not enabled in this session");
+				try {
+					const result = await reloadMCPTools(session, manager);
+					return success(id, "reload_mcp", { failedConnections: result.errors.size });
+				} catch {
+					throw new Error("MCP reload failed; check session activity and server configuration");
+				}
+			}
+			case "set_mcp_connection": {
+				if (
+					typeof command.name !== "string" ||
+					!/^[a-zA-Z0-9_.:-]{1,100}$/.test(command.name) ||
+					typeof command.connected !== "boolean"
+				)
+					throw new Error("Invalid MCP connection request");
+				if (session.isStreaming || session.isCompacting) throw new Error("Session is busy");
+				const manager = MCPManager.instance();
+				if (!manager?.getServerConfig(command.name)) throw new Error("MCP server is not loaded in this session");
+				if (command.connected) {
+					if (
+						manager.getConnectionStatus(command.name) !== "connected" &&
+						!(await manager.reconnectServer(command.name, { manual: true }))
+					)
+						throw new Error("MCP connection failed; inspect server authentication and configuration");
+				} else await manager.disconnectServer(command.name, { preserveConfig: true });
+				await session.refreshMCPTools(manager.getTools());
+				return success(id, "set_mcp_connection");
 			}
 
 			case "set_todos": {

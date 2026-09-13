@@ -1977,6 +1977,10 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
+	if (!opts.check)
+		throw new Error(
+			"Upstream self-update is disabled in the Multivac fork. Build and install arcanite24/oh-my-pi using the documented backup and rollback procedure.",
+		);
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;

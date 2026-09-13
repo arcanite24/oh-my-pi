@@ -139,39 +139,75 @@ test("getInstalledBrowsers scans only valid cache installation names", async () 
 	]);
 });
 
-test("install streams and extracts stored, deflated, nested, executable, and symlink entries", async () => {
-	const root = await makeRoot();
-	const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/synthetic-chrome.zip"));
-	const server = Bun.serve({ port: 0, fetch: () => new Response(fixture) });
-	const progress: Array<{ downloadedBytes: number; totalBytes: number }> = [];
-	try {
-		const installed = await install({
-			browser: Browser.CHROME,
-			platform: BrowserPlatform.LINUX,
-			buildId: BUILD_ID,
-			cacheDir: root,
-			baseUrl: String(server.url),
-			downloadProgressCallback: update => progress.push(update),
-		});
-		const executable = await fs.readFile(installed.executablePath, "utf8");
-		expect(executable).toBe("#!/bin/sh\necho synthetic chrome\n");
-		if (process.platform !== "win32") {
-			expect((await fs.stat(installed.executablePath)).mode & 0o777).toBe(0o755);
+test.skipIf(process.platform === "win32")(
+	"install streams and extracts stored, deflated, nested, executable, and symlink entries",
+	async () => {
+		const root = await makeRoot();
+		const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/synthetic-chrome.zip"));
+		const server = Bun.serve({ port: 0, fetch: () => new Response(fixture) });
+		const progress: Array<{ downloadedBytes: number; totalBytes: number }> = [];
+		try {
+			const installed = await install({
+				browser: Browser.CHROME,
+				platform: BrowserPlatform.LINUX,
+				buildId: BUILD_ID,
+				cacheDir: root,
+				baseUrl: String(server.url),
+				downloadProgressCallback: update => progress.push(update),
+			});
+			const executable = await fs.readFile(installed.executablePath, "utf8");
+			expect(executable).toBe("#!/bin/sh\necho synthetic chrome\n");
+			if (process.platform !== "win32") {
+				expect((await fs.stat(installed.executablePath)).mode & 0o777).toBe(0o755);
+			}
+			expect(await fs.readFile(path.join(installed.path, "chrome-linux64/nested/data.txt"), "utf8")).toBe(
+				"nested fixture\n",
+			);
+			if (process.platform !== "win32") {
+				expect((await fs.stat(path.join(installed.path, "chrome-linux64/nested/data.txt"))).mode & 0o777).toBe(
+					0o640,
+				);
+			}
+			expect(await fs.readlink(path.join(installed.path, "chrome-linux64/chrome-link"))).toBe("chrome");
+			expect(progress.length).toBeGreaterThan(0);
+			expect(progress.at(-1)?.downloadedBytes).toBe(fixture.size);
+			expect(progress.at(-1)?.totalBytes).toBe(fixture.size);
+		} finally {
+			server.stop(true);
 		}
-		expect(await fs.readFile(path.join(installed.path, "chrome-linux64/nested/data.txt"), "utf8")).toBe(
-			"nested fixture\n",
-		);
-		if (process.platform !== "win32") {
-			expect((await fs.stat(path.join(installed.path, "chrome-linux64/nested/data.txt"))).mode & 0o777).toBe(0o640);
+	},
+);
+
+test.skipIf(process.platform !== "win32")(
+	"install extracts a Windows browser archive and reports completed download",
+	async () => {
+		const root = await makeRoot();
+		const zip = await encodeArchive("zip", [
+			["chrome-win64/chrome.exe", new TextEncoder().encode("synthetic windows executable")],
+			["chrome-win64/resources/data.txt", new TextEncoder().encode("nested fixture")],
+		]);
+		const server = Bun.serve({ port: 0, fetch: () => new Response(new Blob([zip])) });
+		const progress: Array<{ downloadedBytes: number; totalBytes: number }> = [];
+		try {
+			const installed = await install({
+				browser: Browser.CHROME,
+				platform: BrowserPlatform.WIN64,
+				buildId: BUILD_ID,
+				cacheDir: root,
+				baseUrl: String(server.url),
+				downloadProgressCallback: update => progress.push(update),
+			});
+			expect(await fs.readFile(installed.executablePath, "utf8")).toBe("synthetic windows executable");
+			expect(await fs.readFile(path.join(installed.path, "chrome-win64/resources/data.txt"), "utf8")).toBe(
+				"nested fixture",
+			);
+			expect(progress.at(-1)?.downloadedBytes).toBe(zip.byteLength);
+			expect(progress.at(-1)?.totalBytes).toBe(zip.byteLength);
+		} finally {
+			server.stop(true);
 		}
-		expect(await fs.readlink(path.join(installed.path, "chrome-linux64/chrome-link"))).toBe("chrome");
-		expect(progress.length).toBeGreaterThan(0);
-		expect(progress.at(-1)?.downloadedBytes).toBe(fixture.size);
-		expect(progress.at(-1)?.totalBytes).toBe(fixture.size);
-	} finally {
-		server.stop(true);
-	}
-});
+	},
+);
 
 test("install extracts a member larger than the default 64 MiB archive cap", async () => {
 	// Regression for #9534: the managed Chrome-for-Testing binary (~269 MB)

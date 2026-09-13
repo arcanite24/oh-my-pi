@@ -238,6 +238,7 @@ describe("AgentStorage model perf aggregates", () => {
 		const env = {
 			...process.env,
 			HOME: homeDir,
+			USERPROFILE: homeDir,
 			OMP_PROFILE: "",
 			PI_CODING_AGENT_DIR: agentDir,
 			PI_PROFILE: "",
@@ -254,6 +255,7 @@ describe("AgentStorage model perf aggregates", () => {
 				'import { getStatsDbPath } from "@oh-my-pi/pi-utils";',
 				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 				"const statsPath = getStatsDbPath();",
+				`if (!statsPath.startsWith(${JSON.stringify(tempDir.path() + path.sep)})) throw new Error("Stats fixture escaped its temporary directory");`,
 				"fs.mkdirSync(path.dirname(statsPath), { recursive: true });",
 				"const statsDb = new Database(statsPath);",
 				'statsDb.run("CREATE TABLE messages (provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER, ttft INTEGER, stop_reason TEXT, timestamp INTEGER)");',

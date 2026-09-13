@@ -60,8 +60,8 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/mess
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
-import type { ContextFileEntry, ToolSession } from "../tools";
-import { resolveEvalBackends } from "../tools/eval-backends";
+import type { ContextFileEntry } from "../tools";
+import { expandExecutionToolNames } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
@@ -3135,13 +3135,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
 		toolNames = [...toolNames, "hub"];
 	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
-	}
+	if (toolNames) toolNames = expandExecutionToolNames(toolNames, { settings });
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;

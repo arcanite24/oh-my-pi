@@ -11,6 +11,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
+import type { LspServerStatus } from "../../lsp/client";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -31,6 +32,7 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcMcpStatus,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -287,6 +289,7 @@ export class RpcClient {
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#promptResultListeners = new Set<(agentInvoked: boolean) => void>();
+	#commandOutputListeners = new Set<(text: string) => void>();
 	#failureListeners = new Set<(kind: "prompt" | "transport", poolMessage?: string) => void>();
 	#abortController = new AbortController();
 
@@ -629,6 +632,12 @@ export class RpcClient {
 			this.#promptResultListeners.delete(listener);
 		};
 	}
+	onCommandOutput(listener: (text: string) => void): () => void {
+		this.#commandOutputListeners.add(listener);
+		return () => {
+			this.#commandOutputListeners.delete(listener);
+		};
+	}
 
 	/** Late prompt failures and worker loss after the initial acknowledgement. */
 	onFailure(listener: (kind: "prompt" | "transport", poolMessage?: string) => void): () => void {
@@ -773,6 +782,19 @@ export class RpcClient {
 	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
 		const response = await this.#send({ type: "get_available_commands" });
 		return this.#getData<{ commands: RpcAvailableSlashCommand[] }>(response).commands;
+	}
+
+	async getMcpStatus(): Promise<RpcMcpStatus> {
+		return this.#getData<RpcMcpStatus>(await this.#send({ type: "get_mcp_status" }));
+	}
+	async getLspStatus(): Promise<LspServerStatus[]> {
+		return this.#getData<LspServerStatus[]>(await this.#send({ type: "get_lsp_status" }));
+	}
+	async reloadMcp(): Promise<{ failedConnections: number }> {
+		return this.#getData<{ failedConnections: number }>(await this.#send({ type: "reload_mcp" }));
+	}
+	async setMcpConnection(name: string, connected: boolean): Promise<void> {
+		await this.#send({ type: "set_mcp_connection", name, connected });
 	}
 
 	/**
@@ -1168,6 +1190,10 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRecord(data) && data.type === "command_output" && typeof data.text === "string") {
+			for (const listener of this.#commandOutputListeners) listener(data.text);
+			return;
+		}
 		if (!isAgentSessionEvent(data)) return;
 
 		for (const listener of this.#sessionEventListeners) {

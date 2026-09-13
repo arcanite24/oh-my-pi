@@ -77,6 +77,22 @@ describe("/mcp reload picks up external mcp.json edits", () => {
 		await removeWithRetries(projectDir);
 	});
 
+	test("failed rediscovery clears the session tool catalog", async () => {
+		const { controller, mcpManager, refreshMCPTools } = createController([]);
+		vi.spyOn(mcpManager, "discoverAndConnect").mockRejectedValueOnce(new Error("Invalid config"));
+		await expect(controller.reloadServers()).rejects.toThrow("Invalid config");
+		expect(refreshMCPTools).toHaveBeenCalledWith([]);
+	});
+
+	test("active sessions keep their connections untouched", async () => {
+		const mcpManager = createMcpManagerStub();
+		const controller = new MCPCommandController(
+			createInteractiveModeContext({ session: { isStreaming: true }, mcpManager }),
+		);
+		await expect(controller.reloadServers()).rejects.toThrow("Session is busy");
+		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
+	});
+
 	test("reloadServers clears fs cache before rediscovery", async () => {
 		const configPath = getMCPConfigPath("project", projectDir);
 		await writeExternalProjectConfig(projectDir, {

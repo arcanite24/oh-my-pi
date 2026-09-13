@@ -11,6 +11,7 @@ import type {
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
 import { RequestIdAllocator } from "../request-id";
+import { mcpHttpStatusError } from "../errors";
 import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
 
@@ -92,7 +93,7 @@ export class LegacySseTransport implements MCPTransport {
 
 			if (!response.ok) {
 				const text = await response.text();
-				throw new Error(`HTTP ${response.status}: ${text}`);
+				throw mcpHttpStatusError(response, text, "connect");
 			}
 			if (!response.body) {
 				throw new Error("Legacy SSE response did not include a body");
@@ -250,7 +251,7 @@ export class LegacySseTransport implements MCPTransport {
 			const response = await this.#postJson(body, operation.signal);
 			if (!response.ok) {
 				const text = await response.text();
-				throw new Error(`HTTP ${response.status}: ${text}`);
+				throw mcpHttpStatusError(response, text, "send");
 			}
 			await response.body?.cancel();
 			return (await deferred.promise) as T;
@@ -284,7 +285,7 @@ export class LegacySseTransport implements MCPTransport {
 			operation.clear();
 			if (!response.ok) {
 				const text = await response.text();
-				throw new Error(`HTTP ${response.status}: ${text}`);
+				throw mcpHttpStatusError(response, text, "send");
 			}
 			await response.body?.cancel();
 		} catch (error) {

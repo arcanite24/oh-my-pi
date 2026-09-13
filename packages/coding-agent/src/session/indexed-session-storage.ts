@@ -49,6 +49,11 @@ interface EnqueueOptions {
 
 const RESOLVED = Promise.resolve();
 
+// Compare native Windows paths and slash-delimited keys without changing stored keys.
+function directoryKey(key: string): string {
+	return process.platform === "win32" ? key.replaceAll("\\", "/") : key;
+}
+
 function enoent(p: string): NodeJS.ErrnoException {
 	const err = new Error(`ENOENT: no such file, '${p}'`) as NodeJS.ErrnoException;
 	err.code = "ENOENT";
@@ -190,11 +195,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
+		dir = directoryKey(dir);
 		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
 		const out: string[] = [];
 		for (const path of this.#index.keys()) {
-			if (!path.startsWith(prefix)) continue;
-			const name = path.slice(prefix.length);
+			const key = directoryKey(path);
+			if (!key.startsWith(prefix)) continue;
+			const name = key.slice(prefix.length);
 			if (name.includes("/") || name.includes("\\")) continue;
 			if (!matchesGlob(name, pattern)) continue;
 			out.push(path);
@@ -323,11 +330,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
 
-		const artifactsDir = sessionPath.slice(0, -6);
+		const artifactsDir = directoryKey(sessionPath.slice(0, -6));
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
 		const paths = [sessionPath];
 		for (const key of this.#index.keys()) {
-			if (key.startsWith(prefix)) paths.push(key);
+			if (directoryKey(key).startsWith(prefix)) paths.push(key);
 		}
 
 		for (const path of paths) await this.#awaitPath(path);

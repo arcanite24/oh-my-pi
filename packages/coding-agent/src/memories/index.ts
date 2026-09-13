@@ -1278,7 +1278,8 @@ function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 }
 
 export function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
+	// Bun file I/O needs the extended Windows path form beyond MAX_PATH.
+	return path.toNamespacedPath(path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd)));
 }
 
 /**

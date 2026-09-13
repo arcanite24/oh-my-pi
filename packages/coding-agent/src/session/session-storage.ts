@@ -102,11 +102,13 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
+	#path: string;
 	#closed = false;
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
 
 	constructor(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }) {
+		this.#path = fpath;
 		this.#onError = options?.onError;
 		const flags = options?.flags ?? "a";
 		// Ensure parent directory exists
@@ -141,7 +143,22 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			}
 		} catch (writeError) {
 			try {
-				fs.ftruncateSync(this.#fd, originalSize);
+				try {
+					fs.ftruncateSync(this.#fd, originalSize);
+				} catch (error) {
+					if (process.platform !== "win32" || !hasFsCode(error, "EPERM")) throw error;
+					// Windows append handles cannot truncate. Reopen without append,
+					// but never roll back a replacement published at the same path.
+					const rollbackFd = fs.openSync(this.#path, "r+");
+					try {
+						const original = fs.fstatSync(this.#fd, { bigint: true });
+						const reopened = fs.fstatSync(rollbackFd, { bigint: true });
+						if (original.dev !== reopened.dev || original.ino !== reopened.ino) throw error;
+						fs.ftruncateSync(rollbackFd, originalSize);
+					} finally {
+						fs.closeSync(rollbackFd);
+					}
+				}
 			} catch (rollbackError) {
 				throw new AggregateError(
 					[toError(writeError), toError(rollbackError)],

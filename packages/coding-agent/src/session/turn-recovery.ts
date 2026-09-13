@@ -2233,20 +2233,9 @@ export class TurnRecovery {
 					if (priorRemainingMs > usageLimitWaitMs) usageLimitWaitMs = priorRemainingMs;
 				}
 				if (recordedUsageLimitOutcome.blockedUntilMs !== undefined) {
-					// The stored deadline merges every mark call for this
-					// credential (longest-wins). Only a deadline past what
-					// THIS call requested — a longer report window, or a
-					// longer block an earlier sibling-session response stored
-					// for the shared credential — may override the wait:
-					// retrying before the credential's actual unblock time
-					// re-hits the cap, but this call's own heuristic
-					// contribution must not re-inflate over the authoritative
-					// report window above.
-					const requestedBlockedUntilMs = Date.now() + (recordedUsageLimitOutcome.retryAfterMs ?? 0);
-					if (recordedUsageLimitOutcome.blockedUntilMs > requestedBlockedUntilMs) {
-						const blockedRemainingMs = Math.max(0, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
-						if (blockedRemainingMs > usageLimitWaitMs) usageLimitWaitMs = blockedRemainingMs;
-					}
+					// AuthStorage already replaced eligible heuristics while retaining
+					// every provider-stated deadline. Wait for its actual merged state.
+					usageLimitWaitMs = Math.max(usageLimitWaitMs, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
 				}
 				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
 					usageLimitWaitMs = siblingAvailabilityWaitMs;

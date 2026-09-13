@@ -345,15 +345,20 @@ describe("uploaders", () => {
 	});
 
 	it("runs a command uploader end to end against a stub binary", async () => {
-		const stub = path.join(os.tmpdir(), `omp-test-uploader-${process.pid}.sh`);
+		const stub = path.join(os.tmpdir(), `omp test uploader-${process.pid}.ts`);
 		await Bun.write(
 			stub,
-			`#!/bin/sh\ntest -s "$2" || exit 3\necho "uploaded $2"\necho "https://files.example/abc.$3"\n`,
+			`const [, , flag, file, ext] = process.argv;
+if (flag !== "--x" || (await Bun.file(file).text()) !== "payload") process.exit(3);
+console.log("uploaded " + file);
+console.log("https://files.example/abc." + ext);
+`,
 		);
-		await fs.promises.chmod(stub, 0o755);
 		cleanups.push(() => void fs.promises.rm(stub, { force: true }));
 
-		const uploader = createCommandUploader(`${stub} --x {file} {ext}`);
+		const uploader = createCommandUploader(
+			`${JSON.stringify(process.execPath)} ${JSON.stringify(stub)} --x {file} {ext}`,
+		);
 		const publication = await uploader.upload({
 			bytes: new Uint8Array(Buffer.from("payload")),
 			mimeType: "image/png",
@@ -376,7 +381,7 @@ describe("uploaders", () => {
 			return accessSync(target, mode);
 		});
 		const uploader = createCommandUploader(
-			`${process.execPath} -e "console.log('https://files.example/' + process.cwd())" {file}`,
+			`${JSON.stringify(process.execPath)} -e "console.log('https://files.example/' + process.cwd())" {file}`,
 		);
 		try {
 			await expect(

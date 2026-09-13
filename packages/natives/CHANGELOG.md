@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Apply Git's configured content filters when reading and restoring patch and stash contents, preserving CRLF worktrees and binary files.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
@@ -140,24 +141,26 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
-	it("deleteSessionWithArtifacts removes JSONL plus any sidecar keys", async () => {
+	it.each(["/", path.sep])("deleteSessionWithArtifacts removes sidecars with separator %s", async separator => {
 		const { client, storage } = await createSqlite();
-		await storage.writeText("/sessions/p/s1.jsonl", "session\n");
-		await storage.writeText("/sessions/p/s1/draft.txt", "draft body");
-		await storage.writeText("/sessions/p/s1/sub/notes", "more");
-		await storage.writeText("/sessions/p/other.jsonl", "untouched\n");
+		const key = (value: string) => value.replaceAll("/", separator);
+		await storage.writeText(key("/sessions/p/s1.jsonl"), "session\n");
+		await storage.writeText(key("/sessions/p/s1/draft.txt"), "draft body");
+		await storage.writeText(key("/sessions/p/s1/sub/notes"), "more");
+		await storage.writeText(key("/sessions/p/other.jsonl"), "untouched\n");
+		await storage.writeText(key("/sessions/p/s10/keep"), "untouched sidecar");
 
-		await storage.deleteSessionWithArtifacts("/sessions/p/s1.jsonl");
+		await storage.deleteSessionWithArtifacts(key("/sessions/p/s1.jsonl"));
 
-		expect(storage.existsSync("/sessions/p/s1.jsonl")).toBe(false);
-		expect(storage.existsSync("/sessions/p/s1/draft.txt")).toBe(false);
-		expect(storage.existsSync("/sessions/p/s1/sub/notes")).toBe(false);
-		expect(storage.existsSync("/sessions/p/other.jsonl")).toBe(true);
+		expect(storage.existsSync(key("/sessions/p/s1.jsonl"))).toBe(false);
+		expect(storage.existsSync(key("/sessions/p/s1/draft.txt"))).toBe(false);
+		expect(storage.existsSync(key("/sessions/p/s1/sub/notes"))).toBe(false);
+		expect(storage.existsSync(key("/sessions/p/other.jsonl"))).toBe(true);
 
 		const remaining = (await client.unsafe(`SELECT path FROM omp_session_files ORDER BY path`)) as Array<{
 			path: string;
 		}>;
-		expect(remaining.map(r => r.path)).toEqual(["/sessions/p/other.jsonl"]);
+		expect(remaining.map(r => r.path)).toEqual([key("/sessions/p/other.jsonl"), key("/sessions/p/s10/keep")]);
 		await client.end();
 	});
 

@@ -1,10 +1,30 @@
 # Changelog
 
 ## [Unreleased]
+- Support long Windows paths for memory summaries and learned lessons without relocating existing data.
+- Recognize native Windows paths when listing SQL/Redis sessions and deleting their sidecar artifacts.
+- Close the agentic commit credential store on completion and early returns so Windows state files are released promptly.
+- Release temporary GitHub-cache SQL statements when the database closes instead of retaining Windows file handles until garbage collection.
+- Release the legacy extension parse database when plugin caches are invalidated, allowing isolated state to close cleanly on Windows.
+- Fixed local plugin linking on Windows by using directory junctions without requiring symlink privileges.
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
 
 ### Added
 
+- Share MCP configuration reload between CLI and browser RPC, reject active sessions, and clear stale tools after failed rediscovery.
+
+- Add scoped native MCP configuration management with write-only connection fields and atomic credential-preserving edits.
+
+- Add idle-session MCP connection controls through RPC, retaining paused server configuration for manual reconnection.
+
+- Expose observed MCP connection names and states through RPC without returning server configuration or credentials.
+
+- Allow browser primary-agent settings through a native `build` definition while preserving defaults when no override exists.
+
+- Added authenticated native agent-definition editing and rename with explicit scope, serialized browser edits, and protection against overwriting a rename destination.
+- Added `--agent-definition` to start a native session from a discovered agent's settings.
+- Browser agent selection now reopens idle sessions with the selected native definition and rejects switches during active work.
+- Native startup agent definitions resolve the `exec` tool alias using the same enabled backends as task agents.
 - Added the Multivac browser RPC adapter with isolated state, credential-pool management, persisted message identities, and session writer leases (browser parity work in progress).
 
 - Added default-off speculative execution for validated local reads, including reads projected from nested JavaScript and Python eval cells.
@@ -13,6 +33,21 @@
 - Added `task.agentServiceTierOverrides` for sparse exact-name service-tier overrides on task/eval agents, so selected agents can use priority/Fast mode without accelerating every subagent ([#9668](https://github.com/can1357/oh-my-pi/pull/9668) by [@alphastorm](https://github.com/alphastorm)).
 
 ### Fixed
+
+- Release temporary agent-database queries on close so Windows database files do not remain locked until garbage collection.
+
+- Preserve session history when a partial write fails on Windows by rolling back incomplete bytes before retrying.
+
+- Preserve the selected native agent on browser shell messages across agent switches and history reloads.
+
+- Prevent upstream self-update from replacing the Multivac fork, including forced and channel-switch installations; read-only update checks remain available.
+
+- Respect the configured native agent directory when discovering user configuration, including browser-saved agent definitions.
+
+- Reap starting browser workers during backend shutdown and reject deletion while a session request is starting.
+- Preserve browser message agent attribution across agent switches, session branches, and backend restarts.
+- Discover project, extension, and skill commands through OMP RPC in the browser command picker.
+- Show local OMP command results in browser chat and retain them across browser reconnects without adding them to model context.
 
 - Acquire the destination writer lease before relocating a runtime-owned session transcript.
 

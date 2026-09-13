@@ -59,6 +59,7 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { buildSkillPromptMessage, loadSkills } from "./extensibility/skills";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
@@ -103,9 +104,11 @@ import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import { discoverAgents } from "./task/discovery";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { expandExecutionToolNames } from "./tools/eval-backends";
 import { sanitizeDisplayWarnings } from "./tools/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
@@ -1106,6 +1109,33 @@ export async function buildSessionOptions(
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
 ): Promise<CreateAgentSessionOptions> {
+	const definition = parsed.agentDefinition
+		? (await discoverAgents(parsed.cwd ?? getProjectDir())).agents.find(
+				agent => agent.name === parsed.agentDefinition,
+			)
+		: undefined;
+	if (parsed.agentDefinition && !definition) throw new Error(`Unknown agent definition: ${parsed.agentDefinition}`);
+	if (definition) {
+		parsed = { ...parsed };
+		parsed.thinking ??= definition.thinkingLevel;
+		if (
+			parsed.prewalk === undefined &&
+			parsed.prewalkInto === undefined &&
+			parsed.noPrewalk === undefined &&
+			definition.prewalk !== undefined
+		) {
+			if (typeof definition.prewalk === "string") parsed.prewalkInto = definition.prewalk;
+			else if (definition.prewalk) parsed.prewalk = true;
+			else parsed.noPrewalk = true;
+		}
+		if (definition.readSummarize !== undefined)
+			activeSettings.override("read.summarize.enabled", definition.readSummarize);
+		if (definition.advisor !== undefined) {
+			activeSettings.override("advisor.enabled", definition.advisor !== false);
+			if (typeof definition.advisor === "string")
+				activeSettings.override("modelRoles", { ...activeSettings.getModelRoles(), advisor: definition.advisor });
+		}
+	}
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
@@ -1403,6 +1433,35 @@ export async function buildSessionOptions(
 		}
 	}
 
+	if (definition) {
+		options.agentName = definition.name;
+		options.agentDisplayName = definition.name;
+		options.spawns = definition.spawns === "*" ? "*" : (definition.spawns ?? []).join(",");
+		if (!parsed.noTools && !parsed.tools && definition.tools) {
+			options.toolNames =
+				options.spawns && !definition.tools.includes("task") ? [...definition.tools, "task"] : definition.tools;
+			options.restrictToolNames = true;
+			options.toolNames = expandExecutionToolNames(options.toolNames, { settings: activeSettings });
+		}
+		if (!parsed.model && !parsed.provider && !parsed.models && definition.model?.length) {
+			options.model = undefined;
+			options.modelPattern = definition.model;
+		}
+		if (definition.output !== undefined) {
+			options.outputSchema = definition.output;
+		}
+		options.requireYieldTool = definition.output !== undefined;
+		const blocks = [definition.systemPrompt];
+		if (definition.autoloadSkills?.length) {
+			const { skills } = await loadSkills({ cwd: options.cwd });
+			for (const name of definition.autoloadSkills) {
+				const skill = skills.find(skill => skill.name === name);
+				if (!skill) throw new Error(`Agent skill not found: ${name}`);
+				blocks.push((await buildSkillPromptMessage(skill, "", "autoload")).message);
+			}
+		}
+		options.systemPrompt = defaultPrompt => [...defaultPrompt, ...blocks];
+	}
 	return options;
 }
 

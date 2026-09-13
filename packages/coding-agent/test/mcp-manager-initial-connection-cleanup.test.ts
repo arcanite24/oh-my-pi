@@ -56,6 +56,31 @@ afterEach(() => {
 });
 
 describe("MCPManager initial connection ownership", () => {
+	it("retains a paused server for manual reconnection without retaining its tools", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toggle-"));
+		const manager = new MCPManager(directory);
+		const marker = path.join(directory, "ready");
+		await fs.writeFile(marker, "");
+		const config: MCPStdioServerConfig = {
+			command: process.execPath,
+			args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts"), marker],
+		};
+		try {
+			await manager.connectServers({ probe: config }, {});
+			expect(manager.getConnectionStatus("probe")).toBe("connected");
+			await manager.disconnectServer("probe", { preserveConfig: true });
+			expect(manager.getAllServerNames()).toContain("probe");
+			expect(manager.getConnectionStatus("probe")).toBe("disconnected");
+			expect(manager.getTools()).toEqual([]);
+			expect(await manager.reconnectServer("probe", { manual: true })).not.toBeNull();
+			expect(manager.getTools().map(tool => tool.name)).toContain(`mcp__probe_${DELAYED_TOOL_NAME}`);
+			await manager.disconnectServer("probe");
+			expect(manager.getAllServerNames()).not.toContain("probe");
+		} finally {
+			await manager.disconnectAll();
+			await removeWithRetries(directory);
+		}
+	});
 	it("closes a connection that resolves after disconnectAll", async () => {
 		const manager = new MCPManager(process.cwd());
 		const deferred = Promise.withResolvers<MCPServerConnection>();

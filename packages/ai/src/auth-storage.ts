@@ -189,6 +189,8 @@ export interface StoredCredentialBlock {
 	blockScope: string;
 	/** Epoch milliseconds. */
 	blockedUntilMs: number;
+	/** Provider-stated deadline; zero denotes a heuristic. Missing legacy provenance is conservative. */
+	providerBlockedUntilMs?: number;
 	/** Last row update timestamp in epoch milliseconds, when provided by the backing store. */
 	updatedAtMs?: number;
 }
@@ -444,9 +446,10 @@ export interface AuthCredentialStore extends Partial<CredentialPoolStore> {
 	cleanExpiredCache(): void;
 	/** Non-expired block for one (credential, providerKey, scope) key, or undefined. */
 	getCredentialBlock?(credentialId: number, providerKey: string, blockScope: string): number | undefined;
+	getCredentialProviderBlock?(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/** Earliest time a shared-store block should be eligible for live-usage reconciliation. */
 	getCredentialBlockReconcileAfter?(credentialId: number, providerKey: string, blockScope: string): number | undefined;
-	/** Upsert with MAX semantics: keep the later blockedUntilMs on conflict. */
+	/** Preserve provider deadlines; a labeled provider deadline may replace an older heuristic. */
 	upsertCredentialBlock?(block: StoredCredentialBlock): void;
 	/** Drop one block row for a credential/provider/scope key. */
 	deleteCredentialBlock?(credentialId: number, providerKey: string, blockScope: string): void;
@@ -1377,7 +1380,7 @@ export class AuthStorage {
 	 * {@link AuthStorage.#credentialBackoff} longest-wins semantics, tracking
 	 * the flag of whichever deadline currently wins.
 	 */
-	#credentialBackoffProviderTimed: Map<string, Map<number, boolean>> = new Map();
+	#credentialBackoffProviderDeadline: Map<string, Map<number, number>> = new Map();
 	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
 	#credentialBackoffProbeAfter: Map<string, Map<number, number>> = new Map();
 	/**
@@ -1853,9 +1856,9 @@ export class AuthStorage {
 			if (backoffMap.size === 0) {
 				this.#credentialBackoff.delete(backoffKey);
 			}
-			this.#credentialBackoffProviderTimed.get(backoffKey)?.delete(credentialIndex);
-			if (this.#credentialBackoffProviderTimed.get(backoffKey)?.size === 0) {
-				this.#credentialBackoffProviderTimed.delete(backoffKey);
+			this.#credentialBackoffProviderDeadline.get(backoffKey)?.delete(credentialIndex);
+			if (this.#credentialBackoffProviderDeadline.get(backoffKey)?.size === 0) {
+				this.#credentialBackoffProviderDeadline.delete(backoffKey);
 			}
 			const probeAfterMap = this.#credentialBackoffProbeAfter.get(backoffKey);
 			probeAfterMap?.delete(credentialIndex);
@@ -1920,35 +1923,38 @@ export class AuthStorage {
 		const scopes = (
 			typeof blockScopeOrScopes === "string" ? [blockScopeOrScopes] : (blockScopeOrScopes ?? [])
 		).filter(scope => scope.length > 0);
-		let blockedUntil = this.#getCredentialBlockedUntilForKey(providerKey, credentialIndex, nowMs);
-		for (const blockScope of scopes) {
-			const scopedBlockedUntil = this.#getCredentialBlockedUntilForKey(
-				this.#toScopedBackoffKey(providerKey, blockScope),
-				credentialIndex,
-				nowMs,
-			);
-			if (scopedBlockedUntil !== undefined && (blockedUntil === undefined || scopedBlockedUntil > blockedUntil)) {
-				blockedUntil = scopedBlockedUntil;
-			}
-		}
-
+		let blockedUntil: number | undefined;
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
-		if (credentialId === undefined) return blockedUntil;
-		const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
-		if (
-			persistedGlobalBlockedUntil !== undefined &&
-			(blockedUntil === undefined || persistedGlobalBlockedUntil > blockedUntil)
-		) {
-			blockedUntil = persistedGlobalBlockedUntil;
-		}
-		for (const blockScope of scopes) {
-			const persistedScopedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
-			if (
-				persistedScopedBlockedUntil !== undefined &&
-				(blockedUntil === undefined || persistedScopedBlockedUntil > blockedUntil)
-			) {
-				blockedUntil = persistedScopedBlockedUntil;
+		for (const scope of ["", ...scopes]) {
+			const key = this.#toScopedBackoffKey(providerKey, scope || undefined);
+			let deadline = this.#getCredentialBlockedUntilForKey(key, credentialIndex, nowMs);
+			const persisted =
+				credentialId === undefined
+					? undefined
+					: this.#readPersistedCredentialBlock(credentialId, providerKey, scope);
+			if (persisted !== undefined && credentialId !== undefined) {
+				if (this.#store.getCredentialProviderBlock && !this.#persistedBlockStoreDamaged) {
+					// SQLite is authoritative across processes, including shorter
+					// report-derived replacements of cached heuristic blocks.
+					deadline = persisted;
+					let providerDeadline = persisted;
+					try {
+						providerDeadline =
+							this.#store.getCredentialProviderBlock(credentialId, providerKey, scope) ?? persisted;
+					} catch {
+						/* Unknown provenance retains the whole stored deadline. */
+					}
+					const deadlines = this.#credentialBackoff.get(key) ?? new Map<number, number>();
+					deadlines.set(credentialIndex, persisted);
+					this.#credentialBackoff.set(key, deadlines);
+					const providerDeadlines = this.#credentialBackoffProviderDeadline.get(key) ?? new Map<number, number>();
+					providerDeadlines.set(credentialIndex, providerDeadline);
+					this.#credentialBackoffProviderDeadline.set(key, providerDeadlines);
+				} else {
+					deadline = Math.max(deadline ?? 0, persisted);
+				}
 			}
+			if (deadline !== undefined) blockedUntil = Math.max(blockedUntil ?? 0, deadline);
 		}
 		return blockedUntil;
 	}
@@ -1964,15 +1970,9 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Whether the in-memory block currently sitting at exactly `deadline` for
-	 * this credential was written with provider-stated timing. Mirrors the
-	 * scope enumeration of {@link AuthStorage.#getCredentialBlockedUntil}.
-	 * A deadline with no matching in-memory entry came from the persisted
-	 * store, which carries no provenance — a stale persisted heuristic guess
-	 * (pre-restart hintless response) must not outrank a fresh complete usage
-	 * report, so persisted-only deadlines count as untimed. Persisted
-	 * deadlines longer than this call's own request still win through the
-	 * merged `blockedUntilMs` comparison, which needs no provenance.
+	 * Whether the current deadline has provider authority. SQLite reads refresh
+	 * this metadata across processes. Unlabeled legacy deadlines are retained
+	 * conservatively; an explicitly labeled heuristic has no provider authority.
 	 */
 	#isProviderTimedBlock(
 		providerKey: string,
@@ -1986,7 +1986,7 @@ export class AuthStorage {
 		for (const key of [providerKey, ...scopes.map(scope => this.#toScopedBackoffKey(providerKey, scope))]) {
 			const entry = this.#credentialBackoff.get(key)?.get(credentialIndex);
 			if (entry === undefined || entry !== deadline) continue;
-			if (this.#credentialBackoffProviderTimed.get(key)?.get(credentialIndex) === true) return true;
+			if ((this.#credentialBackoffProviderDeadline.get(key)?.get(credentialIndex) ?? 0) >= deadline) return true;
 		}
 		return false;
 	}
@@ -2008,20 +2008,29 @@ export class AuthStorage {
 	): void {
 		const backoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
 		const backoffMap = this.#credentialBackoff.get(backoffKey) ?? new Map<number, number>();
-		const existing = backoffMap.get(credentialIndex) ?? 0;
-		const nextBlockedUntil = Math.max(existing, blockedUntilMs);
+		const timedMap = this.#credentialBackoffProviderDeadline.get(backoffKey) ?? new Map<number, number>();
+		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
+		const persisted =
+			credentialId === undefined
+				? undefined
+				: this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		let persistedProviderDeadline = persisted ?? 0;
+		if (credentialId !== undefined && persisted !== undefined) {
+			try {
+				persistedProviderDeadline =
+					this.#store.getCredentialProviderBlock?.(credentialId, providerKey, blockScope ?? "") ?? persisted;
+			} catch {
+				/* Unknown provenance retains the whole stored deadline. */
+			}
+		}
+		const existing = Math.max(backoffMap.get(credentialIndex) ?? 0, persisted ?? 0);
+		const existingProviderDeadline = Math.max(timedMap.get(credentialIndex) ?? 0, persistedProviderDeadline);
+		const nextProviderDeadline = Math.max(existingProviderDeadline, providerTimed ? blockedUntilMs : 0);
+		const nextBlockedUntil = Math.max(providerTimed ? nextProviderDeadline : existing, blockedUntilMs);
 		backoffMap.set(credentialIndex, nextBlockedUntil);
 		this.#credentialBackoff.set(backoffKey, backoffMap);
-		const timedMap = this.#credentialBackoffProviderTimed.get(backoffKey) ?? new Map<number, boolean>();
-		const existingTimed = timedMap.get(credentialIndex) ?? false;
-		const nextTimed =
-			blockedUntilMs > existing
-				? providerTimed
-				: blockedUntilMs === existing
-					? existingTimed || providerTimed
-					: existingTimed;
-		timedMap.set(credentialIndex, nextTimed);
-		this.#credentialBackoffProviderTimed.set(backoffKey, timedMap);
+		timedMap.set(credentialIndex, nextProviderDeadline);
+		this.#credentialBackoffProviderDeadline.set(backoffKey, timedMap);
 		const probeAfterMap = this.#credentialBackoffProbeAfter.get(backoffKey) ?? new Map<number, number>();
 		probeAfterMap.set(credentialIndex, Math.min(nextBlockedUntil, Date.now() + USAGE_REPORT_TTL_MS));
 		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
@@ -2029,14 +2038,14 @@ export class AuthStorage {
 
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock || this.#persistedBlockStoreDamaged) return;
-		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return;
 		try {
 			upsertCredentialBlock({
 				credentialId,
 				providerKey,
 				blockScope: blockScope ?? "",
-				blockedUntilMs: nextBlockedUntil,
+				blockedUntilMs,
+				providerBlockedUntilMs: providerTimed ? blockedUntilMs : 0,
 			});
 		} catch (err) {
 			if (this.#handlePersistedBlockStoreError(err)) return;
@@ -2413,9 +2422,9 @@ export class AuthStorage {
 				this.#credentialBackoff.delete(key);
 			}
 		}
-		for (const key of this.#credentialBackoffProviderTimed.keys()) {
+		for (const key of this.#credentialBackoffProviderDeadline.keys()) {
 			if (key.startsWith(`${provider}:`)) {
-				this.#credentialBackoffProviderTimed.delete(key);
+				this.#credentialBackoffProviderDeadline.delete(key);
 			}
 		}
 	}
@@ -3423,6 +3432,7 @@ export class AuthStorage {
 		const previousRefresh =
 			previous.refreshToken && previous.refreshToken !== REMOTE_REFRESH_SENTINEL ? previous.refreshToken : undefined;
 		const match = entries.find(entry => {
+			if (entry.credential.type === "api_key") return !!previous.apiKey && entry.credential.key === previous.apiKey;
 			if (entry.credential.type !== "oauth") return false;
 			if (previousRefresh && entry.credential.refresh === previousRefresh) return true;
 			if (previous.accessToken && entry.credential.access === previous.accessToken) return true;
@@ -4868,6 +4878,13 @@ export class AuthStorage {
 			}
 		}
 		options?.signal?.throwIfAborted();
+
+		// A complete report replaces heuristic cooldowns. The rotation merge
+		// preserves provider-stated deadlines, including persisted sibling blocks.
+		if (reportResetAtMs !== undefined && options?.providerTimed !== true) {
+			blockedUntil = reportResetAtMs;
+			providerTimed = true;
+		}
 
 		// Usage lookup may refresh, disable, or remove a row. Re-resolve its
 		// durable id before applying positional in-memory and persisted blocks.
@@ -6651,10 +6668,10 @@ export class AuthStorage {
 			backoffMap.delete(index);
 			if (backoffMap.size === 0) this.#credentialBackoff.delete(key);
 		}
-		for (const [key, timedMap] of this.#credentialBackoffProviderTimed) {
+		for (const [key, timedMap] of this.#credentialBackoffProviderDeadline) {
 			if (key !== providerKey && !key.startsWith(scopedPrefix)) continue;
 			timedMap.delete(index);
-			if (timedMap.size === 0) this.#credentialBackoffProviderTimed.delete(key);
+			if (timedMap.size === 0) this.#credentialBackoffProviderDeadline.delete(key);
 		}
 		for (const [key, probeAfterMap] of this.#credentialBackoffProbeAfter) {
 			if (key !== providerKey && !key.startsWith(scopedPrefix)) continue;
@@ -6717,9 +6734,9 @@ export class AuthStorage {
 		const backoffMap = this.#credentialBackoff.get(key);
 		backoffMap?.delete(credentialIndex);
 		if (backoffMap?.size === 0) this.#credentialBackoff.delete(key);
-		const timedMap = this.#credentialBackoffProviderTimed.get(key);
+		const timedMap = this.#credentialBackoffProviderDeadline.get(key);
 		timedMap?.delete(credentialIndex);
-		if (timedMap?.size === 0) this.#credentialBackoffProviderTimed.delete(key);
+		if (timedMap?.size === 0) this.#credentialBackoffProviderDeadline.delete(key);
 		const probeAfterMap = this.#credentialBackoffProbeAfter.get(key);
 		probeAfterMap?.delete(credentialIndex);
 		if (probeAfterMap?.size === 0) this.#credentialBackoffProbeAfter.delete(key);
@@ -6745,7 +6762,9 @@ export class AuthStorage {
 	/** Providers whose stale usage-limit blocks a healthy live report may clear. */
 	#supportsUsageBlockHealing(provider: Provider): boolean {
 		return (
-			provider === "openai-codex" || this.#rankingStrategyResolver?.(provider)?.healableBlockScopes !== undefined
+			provider === "openai-codex" ||
+			this.#rankingStrategyResolver?.(provider)?.poolWindowIds !== undefined ||
+			this.#rankingStrategyResolver?.(provider)?.healableBlockScopes !== undefined
 		);
 	}
 
@@ -6758,10 +6777,46 @@ export class AuthStorage {
 	 * {@link CredentialRankingStrategy.healableBlockScopes}.
 	 */
 	#reconcileUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
-		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const credentialIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+		const entries = this.#getStoredCredentials(provider);
+		const credentialIndex = entries.findIndex(entry => entry.id === credentialId);
 		if (credentialIndex < 0) return;
+		const providerKey = this.#getProviderTypeKey(provider, entries[credentialIndex].credential.type);
 		const strategy = this.#rankingStrategyResolver?.(provider);
+		if (strategy?.poolWindowIds) {
+			// Reconcile before selection: an exhausted account cannot start another
+			// request merely to replace an old heuristic with its known reset.
+			const now = Date.now();
+			if (
+				!Number.isFinite(report.fetchedAt) ||
+				report.fetchedAt > now ||
+				now - report.fetchedAt > USAGE_REPORT_TTL_MS
+			)
+				return;
+			const limits = strategy.poolWindowIds.map(id => report.limits.find(limit => limit.id === id));
+			if (limits.some(limit => !limit || resolveUsedFraction(limit) === undefined)) return;
+			const gatingLimits = this.#store.getPoolAccount?.(credentialId).allowPaidFallback
+				? this.#getScopedUsageLimits(strategy, report, {})
+				: report.limits;
+			const exhausted = gatingLimits.filter(limit => this.#isUsageLimitExhausted(limit));
+			if (exhausted.length === 0) return;
+			const resets = exhausted.map(limit => this.#resolveWindowResetAt(limit.window));
+			if (resets.some(reset => reset === undefined || reset <= now)) return;
+			const blockedUntilMs = Math.max(...resets.filter((reset): reset is number => reset !== undefined));
+			// Only local stores with provenance can safely shorten an old guess.
+			if (!this.#store.getCredentialProviderBlock || !this.#store.poolTransaction) return;
+			this.#store.poolTransaction(() => {
+				if (this.#readPersistedCredentialBlock(credentialId, providerKey, "") === undefined) return;
+				this.#assertPersistedBlockStoreWritable();
+				this.#store.upsertCredentialBlock?.({
+					credentialId,
+					providerKey,
+					blockScope: "",
+					blockedUntilMs,
+					providerBlockedUntilMs: blockedUntilMs,
+				});
+			});
+			return;
+		}
 		if (provider !== "openai-codex") {
 			for (const { blockScope, limits } of strategy?.healableBlockScopes?.(report) ?? []) {
 				if (limits.length === 0 || this.#isUsageLimitReached(limits)) continue;

@@ -4,12 +4,33 @@
  * Integrates MCP tool discovery with the custom tools system.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { clearCache as clearFsCache } from "../capability/fs";
+import type { AgentSession } from "../session/agent-session";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
 import { AgentStorage } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
 import { type MCPLoadResult, MCPManager } from "./manager";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { MCPToolCache } from "./tool-cache";
+
+/** Shared by interactive and RPC reloads; never leave removed tools callable after failure. */
+export async function reloadMCPTools(session: AgentSession, manager: MCPManager): Promise<MCPLoadResult> {
+	if (session.isStreaming || session.isCompacting || session.isBashRunning || session.isEvalRunning)
+		throw new Error("Session is busy");
+	await manager.disconnectAll();
+	session.setMCPPromptCommands([]);
+	clearFsCache();
+	try {
+		return await manager.discoverAndConnect({
+			enableProjectConfig: session.settings.get("mcp.enableProjectConfig") ?? true,
+			filterExa: true,
+			filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+			extensionRoots: session.effectiveExtensionRoots,
+		});
+	} finally {
+		await session.refreshMCPTools(manager.getTools());
+	}
+}
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {

@@ -37,6 +37,7 @@ async function runGit(repo: string, args: string[]): Promise<string> {
 	if ((exitCode ?? 0) !== 0) {
 		throw new Error(stderr.trim() || stdout.trim() || `git ${args.join(" ")} failed with exit code ${exitCode ?? 0}`);
 	}
+	if (args[0] === "init") await runGit(repo, ["config", "core.autocrlf", "false"]);
 	return stdout.trim();
 }
 
@@ -323,7 +324,8 @@ describe("worktree isolation helpers", () => {
 				// conflict. If the task branch also adds an ignore rule for that
 				// restored path, the fallback must clean the restored ignored path
 				// without interpreting stash-derived filenames as pathspec magic.
-				const magicName = ":(glob)*";
+				const magicName = process.platform === "win32" ? "[ab]" : ":(glob)*";
+				const ignorePattern = process.platform === "win32" ? "\\[ab\\]" : magicName;
 				const buildLog = path.join(repo, "build.log");
 				const ignoredBranch = "task/ignored-restored-untracked";
 				await fs.writeFile(path.join(repo, ".gitignore"), "*.log\n");
@@ -332,7 +334,7 @@ describe("worktree isolation helpers", () => {
 				await runGit(repo, ["checkout", "-q", "-b", ignoredBranch]);
 				await Promise.all([
 					fs.writeFile(path.join(repo, "merged.txt"), "task branch change\n"),
-					fs.writeFile(path.join(repo, ".gitignore"), `*.log\n${magicName}\n`),
+					fs.writeFile(path.join(repo, ".gitignore"), `*.log\n${ignorePattern}\n`),
 				]);
 				await runGit(repo, ["add", ".gitignore", "merged.txt"]);
 				await runGit(repo, ["commit", "-q", "-m", "task-change-ignored-note"]);
@@ -668,14 +670,24 @@ describe("detachGitDir", () => {
 		const pointerBefore = await fs.readFile(gitEntry, "utf8");
 		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
 		const indexMode = (await fs.stat(indexPath)).mode;
-		await fs.chmod(indexPath, 0);
+		if (process.platform === "win32") {
+			await fs.rename(indexPath, `${indexPath}.fixture-backup`);
+			await fs.mkdir(indexPath);
+		} else {
+			await fs.chmod(indexPath, 0);
+		}
 		try {
 			await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
 				code: "Io",
-				stderr: expect.stringContaining("Permission denied"),
+				...(process.platform === "win32" ? {} : { stderr: expect.stringContaining("Permission denied") }),
 			});
 		} finally {
-			await fs.chmod(indexPath, indexMode);
+			if (process.platform === "win32") {
+				await fs.rmdir(indexPath);
+				await fs.rename(`${indexPath}.fixture-backup`, indexPath);
+			} else {
+				await fs.chmod(indexPath, indexMode);
+			}
 		}
 		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
 		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
@@ -815,7 +827,7 @@ describe("detachGitDir", () => {
 		const aliasBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-alias-"));
 		tempDirs.push(aliasBase);
 		const aliasMain = path.join(aliasBase, "main-link");
-		await fs.symlink(path.dirname(commonDir), aliasMain);
+		await fs.symlink(path.dirname(commonDir), aliasMain, process.platform === "win32" ? "junction" : "dir");
 		const aliasCommonDir = path.join(aliasMain, ".git");
 
 		const iso = await copyTree(wt);

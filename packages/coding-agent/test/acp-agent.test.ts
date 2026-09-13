@@ -21,6 +21,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resetSessionTitleIndexForTests } from "@oh-my-pi/pi-coding-agent/session/title-index";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -474,6 +475,7 @@ afterEach(async () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
 	resetSettingsForTest();
+	resetSessionTitleIndexForTests();
 
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });

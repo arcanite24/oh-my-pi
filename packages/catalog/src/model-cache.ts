@@ -67,15 +67,16 @@ let sharedDbPath: string | null = null;
 
 function openDb(resolvedPath: string): Database {
 	const db = new Database(resolvedPath, { create: true });
-	// Install the busy handler BEFORE any lock-taking statement. See
-	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 3000");
-	// Schema invalidation can delete rows containing credentials written by old
-	// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
-	// free pages where a raw scan of models.db can still recover them (#5780).
-	db.run("PRAGMA secure_delete = ON");
-	db.run("PRAGMA journal_mode = WAL");
-	db.run(`
+	try {
+		// Install the busy handler BEFORE any lock-taking statement. See
+		// https://github.com/can1357/oh-my-pi/issues/2421.
+		db.run("PRAGMA busy_timeout = 3000");
+		// Schema invalidation can delete rows containing credentials written by old
+		// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
+		// free pages where a raw scan of models.db can still recover them (#5780).
+		db.run("PRAGMA secure_delete = ON");
+		db.run("PRAGMA journal_mode = WAL");
+		db.run(`
 		CREATE TABLE IF NOT EXISTS model_cache (
 			provider_id TEXT PRIMARY KEY,
 			version INTEGER NOT NULL,
@@ -88,19 +89,26 @@ function openDb(resolvedPath: string): Database {
 			models TEXT NOT NULL
 		)
 	`);
-	migrateCacheSchema(db);
-	return db;
+		migrateCacheSchema(db);
+		return db;
+	} catch (error) {
+		db.close();
+		throw error;
+	}
+}
+
+/** Release the process-wide cache connection; the next cache access reopens it. */
+export function closeModelCache(): void {
+	sharedDb?.close();
+	sharedDb = null;
+	sharedDbPath = null;
 }
 
 function getSharedDb(resolvedPath: string): Database {
 	if (sharedDb && sharedDbPath === resolvedPath) {
 		return sharedDb;
 	}
-	if (sharedDb) {
-		sharedDb.close();
-		sharedDb = null;
-		sharedDbPath = null;
-	}
+	closeModelCache();
 	const db = openDb(resolvedPath);
 	sharedDb = db;
 	sharedDbPath = resolvedPath;
@@ -149,11 +157,7 @@ function quarantineCorruptModelCache(resolvedPath: string): void {
  * their existing best-effort paths.
  */
 function healCorruptModelCache(resolvedPath: string, shared: boolean, err: unknown): void {
-	if (shared && sharedDb) {
-		sharedDb.close();
-		sharedDb = null;
-		sharedDbPath = null;
-	}
+	if (shared) closeModelCache();
 	quarantineCorruptModelCache(resolvedPath);
 	const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
 	if (reportedCorruptPaths.has(resolvedPath)) {

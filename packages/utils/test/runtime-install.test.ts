@@ -249,16 +249,19 @@ describe("writeRuntimeManifest", () => {
 // `${runtimeDir}.lock` mkdir *directory* must not permanently break the new
 // file-backed lock path.
 describe("ensureRuntimeInstalled install lock", () => {
-	// A local `file:` dependency keeps the real `bun install` offline and
-	// deterministic — no registry, no network.
+	// A local tarball keeps bun install offline without requiring directory symlinks.
 	async function makeFileDependency(): Promise<{ spec: string; probe: string }> {
 		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-dep-"));
 		tempDirs.push(src);
-		await fs.writeFile(
-			path.join(src, "package.json"),
-			JSON.stringify({ name: "omp-runtime-fixture", version: "1.0.0" }),
+		const archive = new Bun.Archive(
+			{
+				"package/package.json": JSON.stringify({ name: "omp-runtime-fixture", version: "1.0.0" }),
+			},
+			{ compress: "gzip" },
 		);
-		return { spec: `file:${src}`, probe: "omp-runtime-fixture" };
+		const tarball = path.join(src, "fixture.tgz");
+		await Bun.write(tarball, await archive.bytes());
+		return { spec: `file:${tarball}`, probe: "omp-runtime-fixture" };
 	}
 
 	async function makeRuntimeDir(): Promise<string> {

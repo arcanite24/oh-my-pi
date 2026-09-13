@@ -123,6 +123,17 @@ Important edge behavior from runtime:
 
 ### State
 
+- `{ id?, type: "get_lsp_status" }` returns the current worker's active language
+  servers as `{ name, root, status, fileTypes }[]`, with status `connecting`, `ready`,
+  or `error`. It does not start language servers or inspect other sessions.
+  The browser adapter exposes the same snapshot at authenticated
+  `GET /session/:id/lsp`.
+  Directory `GET /lsp` aggregates managed workers in that directory, without
+  starting dormant sessions or controlling CLI agents. It preserves worker
+  roots and distinguishes duplicate servers by session. Connecting servers
+  return HTTP 503 rather than an empty or erroneous successful snapshot;
+  failed worker reads also fail the request.
+
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`

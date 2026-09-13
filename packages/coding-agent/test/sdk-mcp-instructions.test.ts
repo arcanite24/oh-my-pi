@@ -49,7 +49,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		originalAgentDir = getAgentDir();
 		setAgentDir(isolatedAgentDir);
 		authStorage = await AuthStorage.create(":memory:");
-		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage, path.join(isolatedAgentDir, "models.yml"));
 	});
 
 	afterAll(() => {

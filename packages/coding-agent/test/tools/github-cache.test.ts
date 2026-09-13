@@ -111,7 +111,7 @@ describe("github-cache db layer", () => {
 		expect(got?.fetchedAt).toBe(2000);
 
 		const db = openDb();
-		const rows = db?.prepare("SELECT COUNT(*) AS c FROM github_view_cache").all() as Array<{ c: number }>;
+		const rows = db?.query("SELECT COUNT(*) AS c FROM github_view_cache").all() as Array<{ c: number }>;
 		expect(rows[0].c).toBe(1);
 	});
 
@@ -186,6 +186,7 @@ describe("github-cache db layer", () => {
 		const parent = path.join(tempDir, "caller-owned-parent");
 		await fs.mkdir(parent, { recursive: true, mode: 0o755 });
 		await fs.chmod(parent, 0o755);
+		const originalMode = (await fs.stat(parent)).mode;
 		process.env.OMP_GITHUB_CACHE_DB = path.join(parent, "github-cache.db");
 		resetCacheForTests();
 
@@ -193,7 +194,7 @@ describe("github-cache db layer", () => {
 
 		expect(db).not.toBeNull();
 		const stat = await fs.stat(parent);
-		expect(stat.mode & 0o777).toBe(0o755);
+		expect(stat.mode).toBe(originalMode);
 	});
 
 	it("preserves rows across openDb() and honors the configured hard TTL via per-lookup sweep", async () => {

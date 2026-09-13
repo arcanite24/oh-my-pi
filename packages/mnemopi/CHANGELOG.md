@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Finalize outstanding SQLite statements when closing owned memory databases so Windows releases their file handles immediately.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

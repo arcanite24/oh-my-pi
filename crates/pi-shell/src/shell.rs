@@ -3362,7 +3362,8 @@ mod tests {
 		// Pin the registry contents rather than iterating whatever it happens to
 		// contain: a loop over the registry cannot notice a name missing from it.
 		// Adding a utility is expected to update this list.
-		let expected = [
+		#[allow(unused_mut)]
+		let mut expected = vec![
 			"b2sum",
 			"base32",
 			"base64",
@@ -3376,7 +3377,6 @@ mod tests {
 			"date",
 			"diff",
 			"dirname",
-			"errno",
 			"fd",
 			"find",
 			"grep",
@@ -3423,6 +3423,8 @@ mod tests {
 			"xargs",
 			"yes",
 		];
+		#[cfg(unix)]
+		expected.insert(13, "errno");
 		let mut names: Vec<&'static str> =
 			pi_builtins::utility_builtins::<brush_core::extensions::DefaultShellExtensions>()
 				.into_iter()

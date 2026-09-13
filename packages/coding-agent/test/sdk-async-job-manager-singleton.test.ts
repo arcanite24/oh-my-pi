@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AsyncJobManager singleton across concurrent top-level sessions", () => {
@@ -194,6 +195,41 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			await primary.dispose();
 		}
 	}, 60000);
+
+	it("releases the transcript lease when startup fails before runtime construction", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-lease-"));
+		tempDirs.push(directory);
+		const manager = SessionManager.create(directory, directory);
+		manager.appendMessage({ role: "user", content: "Preserve this session", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const file = manager.getSessionFile()!;
+		const failure = spyOn(manager, "getAdditionalDirectories").mockImplementation(() => {
+			throw new Error("forced early startup failure");
+		});
+		try {
+			await expect(
+				createAgentSession({
+					cwd: directory,
+					agentDir: directory,
+					sessionManager: manager,
+					settings: Settings.isolated(),
+					modelRegistry: sharedModelRegistry,
+					additionalDirectories: [directory],
+				}),
+			).rejects.toThrow("forced early startup failure");
+			const replacement = await SessionManager.open(file);
+			try {
+				await replacement.acquireOwnership();
+				expect(replacement.getBranch().some(entry => entry.type === "message")).toBe(true);
+			} finally {
+				await replacement.close();
+			}
+		} finally {
+			failure.mockRestore();
+			await manager.close();
+		}
+	});
 
 	it("clears a manager installed before a top-level session startup failure takes ownership", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-startup-failure-${Snowflake.next()}-`));

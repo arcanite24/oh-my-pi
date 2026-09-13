@@ -197,5 +197,5 @@ export async function linkPlugin(localPath: string): Promise<void> {
 	}
 
 	// Create symlink using fs instead of shell command
-	await fs.symlink(absolutePath, linkPath);
+	await fs.symlink(absolutePath, linkPath, process.platform === "win32" ? "junction" : "dir");
 }

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { recoverOrphanedBackups } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 class FsCodeError extends Error {
 	code: string;
@@ -224,10 +224,17 @@ describe("FileSessionStorage.writeTextAtomic commitGuard cleanup", () => {
 });
 
 describe("recoverOrphanedBackups", () => {
+	let dir: string;
+	beforeEach(async () => {
+		dir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-orphan-recovery-"));
+	});
+	afterEach(async () => {
+		await fsp.rm(dir, { recursive: true, force: true });
+	});
+
 	it("promotes an orphaned <basename>.jsonl.<snowflake>.bak back to the primary path when the primary is missing", async () => {
-		const storage = new MemorySessionStorage();
-		const dir = "/sessions/proj";
-		const primary = `${dir}/session-abc.jsonl`;
+		const storage = new FileSessionStorage();
+		const primary = path.join(dir, "session-abc.jsonl");
 		const backup = `${primary}.1700000000000.bak`;
 		storage.writeTextSync(backup, '{"type":"session","id":"abc"}\n');
 
@@ -239,9 +246,8 @@ describe("recoverOrphanedBackups", () => {
 	});
 
 	it("leaves the backup alone when the primary already exists", async () => {
-		const storage = new MemorySessionStorage();
-		const dir = "/sessions/proj";
-		const primary = `${dir}/session-xyz.jsonl`;
+		const storage = new FileSessionStorage();
+		const primary = path.join(dir, "session-xyz.jsonl");
 		const backup = `${primary}.1700000000000.bak`;
 		storage.writeTextSync(primary, '{"type":"session","id":"xyz","keep":true}\n');
 		storage.writeTextSync(backup, '{"type":"session","id":"xyz","stale":true}\n');
@@ -253,15 +259,14 @@ describe("recoverOrphanedBackups", () => {
 	});
 
 	it("picks the newest backup when multiple orphans exist for the same primary", async () => {
-		const storage = new MemorySessionStorage();
-		const dir = "/sessions/proj";
-		const primary = `${dir}/session-multi.jsonl`;
+		const storage = new FileSessionStorage();
+		const primary = path.join(dir, "session-multi.jsonl");
 		const older = `${primary}.100.bak`;
 		const newer = `${primary}.200.bak`;
 		storage.writeTextSync(older, "older");
-		// Force the newer backup to have a strictly higher mtime so recovery is deterministic.
-		await Bun.sleep(5);
 		storage.writeTextSync(newer, "newer");
+		await fsp.utimes(older, 100, 100);
+		await fsp.utimes(newer, 200, 200);
 
 		await recoverOrphanedBackups(dir, storage);
 

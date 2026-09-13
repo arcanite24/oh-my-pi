@@ -4437,7 +4437,7 @@ describe("lsp regressions", () => {
 			idleTimeoutMs: undefined,
 		});
 		vi.spyOn(lspClient, "getActiveClients").mockReturnValue([
-			{ name: "typescript-language-server", status: "ready", fileTypes: [".ts"] },
+			{ name: "typescript-language-server", root: process.cwd(), status: "ready", fileTypes: [".ts"] },
 		]);
 
 		const tool = new LspTool(makeLspSession(process.cwd()));

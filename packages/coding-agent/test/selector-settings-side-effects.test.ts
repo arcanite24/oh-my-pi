@@ -16,6 +16,7 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -899,8 +900,10 @@ describe("selector setting side effects", () => {
 				hub.handleInput("\x1b[B"); // Project scope → global scope.
 				hub.handleInput("\n"); // Save the hidden global fallback.
 				await globalAssignmentApplied.promise;
+				await settings.flush();
 
 				expect(settings.getGlobalModelRole("default")).toBe(projectSelector);
+				expect(await Bun.file(path.join(testDir, "config.yml")).text()).toContain(`default: ${projectSelector}`);
 				expect(settings.getModelRole("default")).toBe(overlaySelector);
 				expect(settings.getModelRoleProvenance("default")).toBe("overlay");
 				expect(setModel).not.toHaveBeenCalled();
@@ -908,6 +911,7 @@ describe("selector setting side effects", () => {
 				hub.dispose();
 			}
 		} finally {
+			AgentStorage.close();
 			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});

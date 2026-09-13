@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -223,6 +224,7 @@ describe("structured subagent primitive", () => {
 			expect(liveSettings.get("retry.modelFallback")).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -262,6 +264,7 @@ describe("structured subagent primitive", () => {
 			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});

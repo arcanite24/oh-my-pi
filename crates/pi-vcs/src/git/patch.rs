@@ -9,6 +9,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	fs,
+	io::Read,
 	path::{Component, Path, PathBuf},
 };
 
@@ -1249,12 +1250,15 @@ fn worktree_map(repo: &GitRepo, gix_repo: &gix::Repository) -> Result<BTreeMap<S
 	tracked_worktree_map(repo, gix_repo, &index)
 }
 fn augment_patch_sources(
-	repo: &GitRepo,
+	_repo: &GitRepo,
 	gix_repo: &gix::Repository,
 	state: &mut BTreeMap<String, FileEntry>,
 	patches: &[FilePatch],
 	reverse: bool,
 ) -> Result<()> {
+	let (mut filter, filter_index) = gix_repo
+		.filter_pipeline(None)
+		.map_err(|err| Error::backend("git patch filter", err))?;
 	for patch in patches {
 		let (source, target, source_mode, target_mode) = patch_sides(patch, reverse);
 		let path = if let Some(path) = source {
@@ -1269,38 +1273,32 @@ fn augment_patch_sources(
 			continue;
 		}
 		let mode = source_mode.or(target_mode).unwrap_or(Mode::FILE);
-		if let Some((bytes, mode)) = read_worktree_entry(&repo.root().join(path), mode)? {
-			let id = gix_repo
-				.write_blob(bytes)
-				.map_err(|err| Error::backend("git hash patch source", err))?
-				.detach();
-			state.insert(path.to_owned(), FileEntry::new(id, mode));
+		if let Some(entry) = read_worktree_entry(&mut filter, &filter_index, path, mode)? {
+			state.insert(path.to_owned(), entry);
 		}
 	}
 	Ok(())
 }
 
 fn tracked_worktree_map(
-	repo: &GitRepo,
+	_repo: &GitRepo,
 	gix_repo: &gix::Repository,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
 	let mut map = BTreeMap::new();
+	let (mut filter, filter_index) = gix_repo
+		.filter_pipeline(None)
+		.map_err(|err| Error::backend("git patch filter", err))?;
 	for (path, entry) in index {
-		let absolute = repo.root().join(path);
-		if let Some((bytes, mode)) = read_worktree_entry(&absolute, entry.mode)? {
-			let id = gix_repo
-				.write_blob(bytes)
-				.map_err(|err| Error::backend("git hash worktree blob", err))?
-				.detach();
-			map.insert(path.clone(), FileEntry::new(id, mode));
+		if let Some(entry) = read_worktree_entry(&mut filter, &filter_index, path, entry.mode)? {
+			map.insert(path.clone(), entry);
 		}
 	}
 	Ok(map)
 }
 
 fn untracked_worktree_map(
-	repo: &GitRepo,
+	_repo: &GitRepo,
 	gix_repo: &gix::Repository,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
@@ -1320,6 +1318,9 @@ fn untracked_worktree_map(
 		)
 		.map_err(|err| Error::backend("git untracked walk", err))?;
 	let mut map = BTreeMap::new();
+	let (mut filter, filter_index) = gix_repo
+		.filter_pipeline(None)
+		.map_err(|err| Error::backend("git patch filter", err))?;
 	for item in walk {
 		let item = item.map_err(|err| Error::backend("git untracked walk", err))?;
 		if item.entry.status != gix::dir::entry::Status::Untracked
@@ -1333,40 +1334,33 @@ fn untracked_worktree_map(
 		if index.contains_key(&path) {
 			continue;
 		}
-		let absolute = repo.root().join(&path);
-		if let Some((bytes, mode)) = read_worktree_entry(&absolute, Mode::FILE)? {
-			let id = gix_repo
-				.write_blob(bytes)
-				.map_err(|err| Error::backend("git hash untracked blob", err))?
-				.detach();
-			map.insert(path, FileEntry::new(id, mode));
+		if let Some(entry) = read_worktree_entry(&mut filter, &filter_index, &path, Mode::FILE)? {
+			map.insert(path, entry);
 		}
 	}
 	Ok(map)
 }
 
-fn read_worktree_entry(path: &Path, index_mode: Mode) -> Result<Option<(Vec<u8>, Mode)>> {
-	let metadata = match fs::symlink_metadata(path) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
-	};
-	if metadata.file_type().is_symlink() {
-		let target = fs::read_link(path)?;
-		#[cfg(unix)]
-		let bytes = {
-			use std::os::unix::ffi::OsStrExt;
-			target.as_os_str().as_bytes().to_vec()
-		};
-		#[cfg(not(unix))]
-		let bytes = target.to_string_lossy().as_bytes().to_vec();
-		return Ok(Some((bytes, Mode::SYMLINK)));
-	}
-	if !metadata.is_file() {
+fn read_worktree_entry(
+	filter: &mut gix::filter::Pipeline<'_>,
+	index: &gix::index::State,
+	path: &str,
+	index_mode: Mode,
+) -> Result<Option<FileEntry>> {
+	let Some((id, kind, metadata)) = filter
+		.worktree_file_to_object(path.as_bytes().as_bstr(), index)
+		.map_err(|err| Error::backend("git patch filter", err))?
+	else {
 		return Ok(None);
-	}
-	let mode = worktree_file_mode(&metadata, index_mode);
-	Ok(Some((fs::read(path)?, mode)))
+	};
+	let mode = if kind == EntryKind::Link {
+		Mode::SYMLINK
+	} else if metadata.is_file() {
+		worktree_file_mode(&metadata, index_mode)
+	} else {
+		return Ok(None);
+	};
+	Ok(Some(FileEntry::new(id, mode)))
 }
 
 #[cfg(unix)]
@@ -1520,7 +1514,19 @@ fn write_worktree_entry(
 		fs::write(&absolute, bytes)?;
 		return Ok(());
 	}
-	fs::write(&absolute, bytes)?;
+	let (mut filter, _) = gix_repo
+		.filter_pipeline(None)
+		.map_err(|err| Error::backend("git patch checkout filter", err))?;
+	let mut output = Vec::new();
+	filter
+		.convert_to_worktree(
+			&bytes,
+			path.as_bytes().as_bstr(),
+			gix::filter::plumbing::driver::apply::Delay::Forbid,
+		)
+		.map_err(|err| Error::backend("git patch checkout filter", err))?
+		.read_to_end(&mut output)?;
+	fs::write(&absolute, output)?;
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
@@ -1609,6 +1615,7 @@ mod tests {
 		git(temp.path(), &["init", "-q"]);
 		git(temp.path(), &["config", "user.name", "Patch Test"]);
 		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		git(temp.path(), &["config", "core.autocrlf", "false"]);
 		for (path, bytes) in files {
 			let absolute = temp.path().join(path);
 			if let Some(parent) = absolute.parent() {
@@ -1628,6 +1635,32 @@ mod tests {
 	fn reset(path: &Path) {
 		git(path, &["reset", "--hard", "-q", "HEAD"]);
 		git(path, &["clean", "-fdq"]);
+	}
+
+	#[test]
+	fn patch_roundtrip_preserves_configured_crlf_and_binary_bytes() {
+		let temp = init(&[("tracked.txt", b"one\ntwo\n"), ("binary.dat", b"\0one\r\n")]);
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		fs::write(temp.path().join("tracked.txt"), b"one\r\nchanged\r\n").unwrap();
+		fs::write(temp.path().join("binary.dat"), b"\0two\r\n").unwrap();
+		let repo = repo(temp.path());
+		let patch = repo
+			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
+			.unwrap();
+		git(temp.path(), &["restore", "."]);
+		assert!(
+			repo
+				.can_apply_patch(&patch, &ApplyOptions::default())
+				.unwrap()
+		);
+		repo.apply_patch(&patch, &ApplyOptions::default()).unwrap();
+		assert_eq!(fs::read(temp.path().join("tracked.txt")).unwrap(), b"one\r\nchanged\r\n");
+		assert_eq!(fs::read(temp.path().join("binary.dat")).unwrap(), b"\0two\r\n");
+		assert!(repo.stash_push(Some("CRLF roundtrip")).unwrap());
+		assert_eq!(fs::read(temp.path().join("tracked.txt")).unwrap(), b"one\r\ntwo\r\n");
+		assert!(repo.stash_try_pop(true).unwrap());
+		assert_eq!(fs::read(temp.path().join("tracked.txt")).unwrap(), b"one\r\nchanged\r\n");
+		assert_eq!(fs::read(temp.path().join("binary.dat")).unwrap(), b"\0two\r\n");
 	}
 
 	#[test]

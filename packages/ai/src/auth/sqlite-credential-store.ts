@@ -460,7 +460,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#getCredentialBlockStmt = this.#db.prepare(
-			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
+			"SELECT blocked_until_ms, provider_blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
 		);
 		this.#listCredentialBlocksByCredentialStmt = this.#db.prepare(
 			`SELECT credential_id, provider_key, block_scope, blocked_until_ms, updated_at
@@ -470,10 +470,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			ORDER BY provider_key ASC, block_scope ASC`,
 		);
 		this.#upsertCredentialBlockStmt = this.#db.prepare(
-			`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at)
-			VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH})
+			`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, provider_blocked_until_ms, updated_at)
+			VALUES (?, ?, ?, ?, ?, ${SQLITE_NOW_EPOCH})
 			ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
-				blocked_until_ms = MAX(blocked_until_ms, excluded.blocked_until_ms),
+				blocked_until_ms = CASE WHEN excluded.provider_blocked_until_ms > 0
+					THEN MAX(COALESCE(provider_blocked_until_ms, blocked_until_ms), excluded.blocked_until_ms)
+					ELSE MAX(blocked_until_ms, excluded.blocked_until_ms) END,
+				provider_blocked_until_ms = MAX(COALESCE(provider_blocked_until_ms, blocked_until_ms), COALESCE(excluded.provider_blocked_until_ms, excluded.blocked_until_ms)),
+				block_revision = block_revision + 1,
 				updated_at = excluded.updated_at`,
 		);
 		this.#deleteCredentialBlocksStmt = this.#db.prepare("DELETE FROM auth_credential_blocks WHERE credential_id = ?");
@@ -782,6 +786,28 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_auth_credential_blocks_expires ON auth_credential_blocks(blocked_until_ms);
 		`);
+		this.#db
+			.transaction(() => {
+				const columns = this.#db.query("PRAGMA table_info(auth_credential_blocks)").all() as Array<{
+					name: string;
+				}>;
+				if (!columns.some(column => column.name === "provider_blocked_until_ms")) {
+					this.#db.run("ALTER TABLE auth_credential_blocks ADD COLUMN provider_blocked_until_ms INTEGER");
+				}
+				if (!columns.some(column => column.name === "block_revision")) {
+					this.#db.run("ALTER TABLE auth_credential_blocks ADD COLUMN block_revision INTEGER NOT NULL DEFAULT 0");
+				}
+				// Older executables cannot label their writes. Preserve those deadlines
+				// conservatively instead of inheriting a prior heuristic's provenance.
+				this.#db.run(`CREATE TRIGGER IF NOT EXISTS auth_credential_blocks_legacy_provenance
+				AFTER UPDATE OF blocked_until_ms ON auth_credential_blocks
+				WHEN NEW.block_revision = OLD.block_revision
+				BEGIN
+					UPDATE auth_credential_blocks SET provider_blocked_until_ms = NULL
+					WHERE credential_id = NEW.credential_id AND provider_key = NEW.provider_key AND block_scope = NEW.block_scope;
+				END`);
+			})
+			.immediate();
 	}
 
 	#createAuthChangeTrackingObjects(): void {
@@ -1598,6 +1624,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return typeof row?.blocked_until_ms === "number" ? row.blocked_until_ms : undefined;
 	}
 
+	getCredentialProviderBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
+		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, Date.now()) as
+			| { blocked_until_ms: number; provider_blocked_until_ms: number | null }
+			| undefined;
+		return row ? (row.provider_blocked_until_ms ?? row.blocked_until_ms) : undefined;
+	}
+
 	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		const nowMs = Date.now();
 		const isCodexBlock = providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY;
@@ -1628,6 +1661,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					block.providerKey,
 					blockScope,
 					block.blockedUntilMs,
+					block.providerBlockedUntilMs ?? null,
 				);
 			}
 		});

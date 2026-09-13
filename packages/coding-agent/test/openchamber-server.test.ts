@@ -1,14 +1,84 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { startOpenChamberServer } from "../src/web/openchamber-server";
 import { AgentStorage } from "../src/session/agent-storage";
+import { SessionManager } from "../src/session/session-manager";
 import { RpcClient } from "../src/modes/rpc/rpc-client";
 import { listAllSessions } from "../src/session/session-listing";
 import { browserMessages } from "../src/web/openchamber-messages";
+import { OpenChamberHost } from "../src/web/openchamber-host";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+
+test("legacy process guard releases historical sessions when the protected process exits", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-guard-"));
+	await fs.writeFile(
+		path.join(directory, "models.yml"),
+		JSON.stringify({
+			providers: {
+				probe: {
+					api: "openai-completions",
+					apiKey: "test-only",
+					baseUrl: "http://127.0.0.1:1/v1",
+					models: [
+						{
+							id: "test",
+							name: "Test",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 1024,
+						},
+					],
+				},
+			},
+		}),
+	);
+	const legacy = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	const host = new OpenChamberHost(
+		[process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
+		path.join(directory, "browser.db"),
+		directory,
+		{ processIds: [legacy.pid] },
+	);
+	try {
+		const manager = SessionManager.create(directory, SessionManager.getDefaultSessionDir(directory, directory));
+		const invalidState = path.join(directory, "invalid-state");
+		await expect(
+			startOpenChamberServer({
+				port: 0,
+				password: crypto.randomUUID(),
+				command: [],
+				dataDir: invalidState,
+				legacySessionGuard: { processIds: [-1] },
+			}),
+		).rejects.toThrow("Invalid legacy session guard");
+		await expect(fs.stat(invalidState)).rejects.toThrow();
+		await manager.ensureOnDisk();
+		await manager.setSessionName("Imported CLI fixture", "user");
+		const historical = { id: manager.getSessionId() };
+		await manager.close();
+		await host.list();
+		await expect(host.client(historical.id)).rejects.toThrow("protected while legacy");
+		const fresh = await host.create(directory);
+		expect((await (await host.client(fresh.id)).getState()).sessionId).toBe(fresh.id);
+		legacy.kill();
+		await legacy.exited;
+		expect((await (await host.client(historical.id)).getState()).sessionId).toBe(historical.id);
+	} finally {
+		legacy.kill();
+		await legacy.exited;
+		await host.close();
+		AgentStorage.close();
+		await removeWithRetries(directory);
+	}
+});
 
 test("browser messages preserve cancellation and truncation without exposing provider errors", () => {
 	const session = {
@@ -38,7 +108,22 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 	const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
 	const request = (route: string, init: RequestInit = {}) => fetch(`${runtime.server.url}${route.slice(1)}`, init);
 	try {
-		for (const route of ["/global/health", "/global/event", "/session", "/omp/pool"]) {
+		for (const route of ["/config", "/global/config"]) {
+			const response = await request(route, { headers: { authorization } });
+			expect(response.status).toBe(200);
+			expect(response.headers.get("X-OMP-MCP-Scope")).toBe("session");
+		}
+		for (const route of [
+			"/global/health",
+			"/global/event",
+			"/session",
+			"/lsp",
+			"/permission",
+			"/vcs",
+			"/omp/pool",
+			"/omp/mcp-config?scope=user",
+			"/omp/agent-definition?name=editable&scope=user",
+		]) {
 			expect((await request(route)).status).toBe(401);
 			expect((await request(route, { headers: { "x-forwarded-email": "owner@example.test" } })).status).toBe(401);
 		}
@@ -62,6 +147,114 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 		const read = await request("/omp/pool", { headers: { authorization } });
 		expect(await read.json()).toMatchObject({ settings: { policy: "round-robin", thresholds: { weekly: 95 } } });
 		expect((await fs.stat(path.join(directory, "agent.db"))).isFile()).toBe(true);
+		const mcpRoute = "/omp/mcp-config?scope=user&name=config-probe";
+		const createdMcp = await request(mcpRoute, {
+			method: "POST",
+			headers: { authorization },
+			body: JSON.stringify({ command: "echo", args: ["secret-argument"], env: { TOKEN: "secret-token" } }),
+		});
+		expect(createdMcp.status).toBe(200);
+		expect(await createdMcp.text()).not.toContain("secret-");
+		expect(
+			await (
+				await request(`/omp/mcp-config?scope=project&directory=${encodeURIComponent(directory)}`, {
+					headers: { authorization },
+				})
+			).json(),
+		).toMatchObject({ servers: [] });
+		expect((await request("/omp/mcp-config", { headers: { authorization } })).status).toBe(400);
+		expect((await request(mcpRoute, { method: "DELETE", headers: { authorization } })).status).toBe(200);
+		const definitionRoute = "/omp/agent-definition?name=editable&scope=user";
+		const defaultDefinition = await request("/omp/agent-definition?name=build&scope=user&inherit=true", {
+			headers: { authorization },
+		});
+		expect(defaultDefinition.status).toBe(200);
+		expect(await defaultDefinition.json()).toMatchObject({
+			inherited: true,
+			content: '---\nname: build\ndescription: OMP coding agent\nspawns: "*"\n---\n',
+		});
+		const content =
+			"---\nname: editable\ndescription: Editable agent\nreadSummarize: false\nautoloadSkills: [guide]\n---\nKeep these native instructions.";
+		expect(
+			(
+				await request(definitionRoute, {
+					method: "PUT",
+					headers: { authorization },
+					body: JSON.stringify({ content }),
+				})
+			).status,
+		).toBe(200);
+		expect(await (await request(definitionRoute, { headers: { authorization } })).json()).toMatchObject({ content });
+		expect(
+			(
+				await request(definitionRoute, {
+					method: "PUT",
+					headers: { authorization, "If-None-Match": "*" },
+					body: JSON.stringify({ content: content.replace("Editable agent", "Do not overwrite") }),
+				})
+			).status,
+		).toBe(400);
+		expect(await fs.readFile(path.join(directory, "agents", "editable.md"), "utf8")).toBe(content);
+		const invalid = await request(definitionRoute, {
+			method: "PUT",
+			headers: { authorization },
+			body: JSON.stringify({ content: "private-invalid-definition" }),
+		});
+		expect(invalid.status).toBe(400);
+		expect(await invalid.text()).not.toContain("private-invalid-definition");
+		expect(await fs.readFile(path.join(directory, "agents", "editable.md"), "utf8")).toBe(content);
+		const rename = (name: string) =>
+			request(definitionRoute, {
+				method: "POST",
+				headers: { authorization },
+				body: JSON.stringify({ name }),
+			});
+		expect((await rename("../escape")).status).toBe(400);
+		await fs.writeFile(path.join(directory, "agents", "occupied.md"), "preserve destination");
+		expect((await rename("occupied")).status).toBe(400);
+		expect(await fs.readFile(path.join(directory, "agents", "occupied.md"), "utf8")).toBe("preserve destination");
+		expect(await fs.readFile(path.join(directory, "agents", "editable.md"), "utf8")).toBe(content);
+		expect((await rename("renamed")).status).toBe(200);
+		const renamedContent = await fs.readFile(path.join(directory, "agents", "renamed.md"), "utf8");
+		expect(renamedContent).toContain("name: renamed");
+		expect(renamedContent).toContain("readSummarize: false");
+		expect(renamedContent).toContain("guide");
+		expect(renamedContent).toEndWith("Keep these native instructions.");
+		expect(await Bun.file(path.join(directory, "agents", "editable.md")).exists()).toBe(false);
+		expect(
+			(
+				await request("/omp/agent-definition?name=renamed&scope=user", {
+					method: "POST",
+					headers: { authorization },
+					body: JSON.stringify({ name: "editable" }),
+				})
+			).status,
+		).toBe(200);
+		expect(
+			(await request("/omp/agent-definition?name=../escape&scope=user", { headers: { authorization } })).status,
+		).toBe(400);
+		expect((await request(definitionRoute, { method: "DELETE", headers: { authorization } })).status).toBe(200);
+		expect(await Bun.file(path.join(directory, "agents", "editable.md")).exists()).toBe(false);
+		expect((await request(definitionRoute, { headers: { authorization } })).status).toBe(404);
+		const inheritedRoute = "/omp/agent-definition?name=scout&scope=user&inherit=true";
+		const inheritedResponse = await request(inheritedRoute, { headers: { authorization } });
+		expect(inheritedResponse.status).toBe(200);
+		const inherited = (await inheritedResponse.json()) as { content: string; inherited: boolean; source: string };
+		expect(inherited.inherited).toBe(true);
+		expect(inherited.source).toBe("bundled");
+		expect(
+			(
+				await request(inheritedRoute, {
+					method: "PUT",
+					headers: { authorization },
+					body: JSON.stringify({ content: inherited.content }),
+				})
+			).status,
+		).toBe(200);
+		expect(await (await request(inheritedRoute, { headers: { authorization } })).json()).toMatchObject({
+			inherited: false,
+			content: inherited.content,
+		});
 	} finally {
 		await runtime.close();
 		AgentStorage.close();
@@ -69,21 +262,185 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 	}
 });
 
+test("session MCP API disconnects and reconnects native tools without exposing config", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-mcp-"));
+	const password = crypto.randomUUID();
+	const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
+	await fs.mkdir(path.join(directory, ".omp"));
+	const marker = path.join(directory, "ready");
+	await fs.writeFile(marker, "");
+	await fs.writeFile(
+		path.join(directory, "models.yml"),
+		JSON.stringify({ providers: { openai: { apiKey: "test-only-key", baseUrl: "http://127.0.0.1:1/v1" } } }),
+	);
+	await fs.writeFile(
+		path.join(directory, ".omp", "mcp.json"),
+		JSON.stringify({
+			mcpServers: {
+				probe: {
+					command: process.execPath,
+					args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts"), marker],
+					env: { TEST_SECRET: "never-in-browser" },
+				},
+			},
+		}),
+	);
+	const runtime = await startOpenChamberServer({
+		port: 0,
+		password,
+		dataDir: directory,
+		command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
+	});
+	try {
+		const session = await runtime.host.create(directory);
+		const url = new URL(`/session/${session.id}/mcp`, runtime.server.url);
+		expect((await fetch(url)).status).toBe(401);
+		const client = await runtime.host.client(session.id);
+		const lspUrl = new URL(`/session/${session.id}/lsp`, runtime.server.url);
+		expect((await fetch(lspUrl)).status).toBe(401);
+		expect(await client.getLspStatus()).toEqual([]);
+		const lspResponse = await fetch(lspUrl, { headers: { authorization } });
+		expect(lspResponse.status).toBe(200);
+		expect(await lspResponse.json()).toEqual([]);
+		const directoryLsp = new URL(`/lsp?directory=${encodeURIComponent(directory)}`, runtime.server.url);
+		const vcsResponse = await fetch(new URL(`/vcs?directory=${encodeURIComponent(directory)}`, runtime.server.url), {
+			headers: { authorization },
+		});
+		expect(vcsResponse.status).toBe(200);
+		expect(await vcsResponse.json()).toEqual({});
+		const permissions = await fetch(new URL("/permission", runtime.server.url), { headers: { authorization } });
+		expect(permissions.status).toBe(200);
+		expect(await permissions.json()).toEqual([]);
+		const lspSnapshot = spyOn(client, "getLspStatus");
+		try {
+			lspSnapshot.mockResolvedValue([{ name: "fixture-lsp", root: directory, status: "ready", fileTypes: [".ts"] }]);
+			const connected = await fetch(directoryLsp, { headers: { authorization } });
+			expect(connected.status).toBe(200);
+			expect(await connected.json()).toEqual([
+				{ id: `${session.id}:0`, name: "fixture-lsp", root: directory, status: "connected" },
+			]);
+			expect(await runtime.host.lspStatus(path.join(directory, "other-project"))).toEqual([]);
+			lspSnapshot.mockResolvedValue([
+				{ name: "fixture-lsp", root: directory, status: "connecting", fileTypes: [".ts"] },
+			]);
+			expect((await fetch(directoryLsp, { headers: { authorization } })).status).toBe(503);
+			lspSnapshot.mockRejectedValue(new Error("fixture worker unavailable"));
+			expect((await fetch(directoryLsp, { headers: { authorization } })).ok).toBe(false);
+		} finally {
+			lspSnapshot.mockRestore();
+		}
+		const deadline = Date.now() + 10_000;
+		while (
+			(await client.getMcpStatus()).servers.find(server => server.name === "probe")?.status !== "connected" &&
+			Date.now() < deadline
+		)
+			await Bun.sleep(25);
+		const read = await fetch(url, { headers: { authorization } });
+		const status = await read.text();
+		expect(status).not.toContain("never-in-browser");
+		expect(JSON.parse(status)).toMatchObject({ servers: [{ name: "probe", status: "connected" }] });
+		const toggle = (connected: boolean) =>
+			fetch(url, {
+				method: "POST",
+				headers: { authorization, "content-type": "application/json" },
+				body: JSON.stringify({ name: "probe", connected }),
+			});
+		expect(await (await toggle(false)).json()).toMatchObject({
+			servers: [{ name: "probe", status: "disconnected" }],
+		});
+		expect((await client.getMcpStatus()).registeredTools).not.toContain("mcp__probe_late_tool");
+		expect(await (await toggle(true)).json()).toMatchObject({ servers: [{ name: "probe", status: "connected" }] });
+		expect((await client.getMcpStatus()).registeredTools).toContain("mcp__probe_late_tool");
+		const configFile = path.join(directory, ".omp", "mcp.json");
+		const originalConfig = await fs.readFile(configFile, "utf8");
+		await fs.writeFile(configFile, '{"mcpServers":{}}');
+		const reloaded = await fetch(url, {
+			method: "POST",
+			headers: { authorization, "content-type": "application/json" },
+			body: '{"reload":true}',
+		});
+		expect(await reloaded.json()).toMatchObject({ servers: [], registeredTools: [], failedConnections: 0 });
+		await fs.writeFile(configFile, originalConfig);
+		expect(await client.reloadMcp()).toEqual({ failedConnections: 0 });
+		expect((await client.getMcpStatus()).registeredTools).toContain("mcp__probe_late_tool");
+	} finally {
+		await runtime.close();
+		AgentStorage.close();
+		await removeWithRetries(directory);
+	}
+}, 30_000);
+
 test("browser host persists sessions and runs local RPC commands without model requests", async () => {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-rpc-"));
+	const password = crypto.randomUUID();
 	await fs.writeFile(
 		path.join(directory, "models.yml"),
 		JSON.stringify({ providers: { openai: { apiKey: "test-only-key", baseUrl: "http://127.0.0.1:1/v1" } } }),
 	);
 	const runtime = await startOpenChamberServer({
 		port: 0,
-		password: crypto.randomUUID(),
+		password,
 		dataDir: directory,
 		command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
 	});
 	try {
 		const info = await runtime.host.create(directory, "RPC test");
+		const starting = runtime.host.prompt(
+			info.id,
+			"Never sent",
+			undefined,
+			undefined,
+			undefined,
+			"missing-browser-agent",
+		);
+		expect(runtime.host.status()[info.id]).toEqual({ type: "busy" });
+		await expect(starting).rejects.toThrow();
+		expect(runtime.host.status()[info.id]?.type).not.toBe("busy");
 		const client = await runtime.host.client(info.id);
+		const mcpStatus = await client.getMcpStatus();
+		expect(Object.keys(mcpStatus).sort()).toEqual(["managerAvailable", "registeredTools", "servers"]);
+		for (const server of mcpStatus.servers) {
+			expect(Object.keys(server).sort()).toEqual(["name", "status"]);
+			expect(["connected", "connecting", "disconnected"]).toContain(server.status);
+		}
+		await fs.mkdir(path.join(directory, ".omp", "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(directory, ".omp", "agents", "browser-profile.md"),
+			"---\nname: browser-profile\ndescription: Read-only browser profile\ntools: [read]\nspawns: []\n---\nUse the browser profile instructions.",
+		);
+		const profileClient = new RpcClient({
+			command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
+			cwd: directory,
+			env: { PI_CODING_AGENT_DIR: directory },
+			args: ["--no-session", "--agent-definition", "browser-profile"],
+		});
+		try {
+			await profileClient.start();
+			const profileState = await profileClient.getState();
+			expect(profileState.systemPrompt?.join("\n")).toContain("Use the browser profile instructions.");
+			expect(profileState.dumpTools?.map(tool => tool.name)).toEqual(["read", "yield"]);
+		} finally {
+			await profileClient.stop();
+		}
+		await fs.writeFile(
+			path.join(directory, ".omp", "agents", "browser-exec.md"),
+			"---\nname: browser-exec\ndescription: Execution profile\ntools: [exec]\nspawns: []\n---\nUse the execution tools.",
+		);
+		for (const js of [true, false]) {
+			const executionClient = new RpcClient({
+				command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
+				cwd: directory,
+				env: { PI_CODING_AGENT_DIR: directory, PI_PY: "0", PI_JS: js ? "1" : "0" },
+				args: ["--no-session", "--agent-definition", "browser-exec"],
+			});
+			try {
+				await executionClient.start();
+				const names = (await executionClient.getState()).dumpTools?.map(tool => tool.name).sort();
+				expect(names).toEqual(js ? ["bash", "eval", "yield"] : ["bash", "yield"]);
+			} finally {
+				await executionClient.stop();
+			}
+		}
 		const [stored] = await listAllSessions(undefined, path.join(directory, "sessions"));
 		expect(stored).toBeDefined();
 		const competing = new RpcClient({
@@ -109,8 +466,85 @@ test("browser host persists sessions and runs local RPC commands without model r
 			}),
 		);
 		expect((await runtime.host.messages(info.id)).at(-1)).toEqual(shell);
-		await runtime.host.prompt(info.id, "/session info");
+		const commandModel = (await client.getAvailableModels())[0];
+		const submitCommand = () =>
+			fetch(new URL(`/session/${info.id}/command`, runtime.server.url), {
+				method: "POST",
+				headers: {
+					authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					command: "session",
+					arguments: "info",
+					messageID: "msg_local_command",
+					model: `${commandModel.provider}/${commandModel.id}`,
+				}),
+			});
+		const commandResponse = await submitCommand();
+		expect(commandResponse.status).toBe(200);
+		const commandMessage = await commandResponse.json();
+		const repeated = await submitCommand();
+		expect(await repeated.json()).toEqual(commandMessage);
 		expect(runtime.host.status()[info.id]).toEqual({ type: "idle" });
+		const commandHistory = await runtime.host.messages(info.id);
+		const commandInput = commandHistory.at(-2);
+		const commandOutput = commandHistory.at(-1);
+		expect(commandInput?.info).toMatchObject({ id: "msg_local_command", role: "user" });
+		expect(commandInput?.parts).toContainEqual(expect.objectContaining({ type: "text", text: "/session info" }));
+		expect(commandMessage).toEqual(commandOutput);
+		expect(commandOutput?.parts).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("Renamed") }),
+		);
+		expect((await client.getMessages()).some(message => message.role === "assistant")).toBe(false);
+		const reopened = new OpenChamberHost([], path.join(directory, "openchamber.db"), directory);
+		try {
+			expect((await reopened.messages(info.id)).at(-2)).toEqual(commandInput);
+			expect((await reopened.messages(info.id)).at(-1)).toEqual(commandOutput);
+		} finally {
+			await reopened.close();
+		}
+		const selectAgent = (agent: string) =>
+			fetch(new URL(`/session/${info.id}/command`, runtime.server.url), {
+				method: "POST",
+				headers: {
+					authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ command: "session", arguments: "info", agent }),
+			});
+		expect((await selectAgent("browser-profile")).status).toBe(200);
+		expect(runtime.host.get(info.id).agent).toBe("browser-profile");
+		const selectedClient = await runtime.host.client(info.id);
+		expect((await selectedClient.getState()).dumpTools?.map(tool => tool.name)).toEqual(["read", "yield"]);
+		expect((await runtime.host.messages(info.id)).some(message => message.info.id === shell.info.id)).toBe(true);
+		expect((await selectAgent("missing-profile")).status).toBe(400);
+		expect(await runtime.host.client(info.id)).toBe(selectedClient);
+		const profileShell = await runtime.host.shell(info.id, "echo native-profile-shell");
+		expect(profileShell.info).toMatchObject({ agent: "browser-profile", mode: "browser-profile" });
+		const buildFile = path.join(directory, ".omp", "agents", "build.md");
+		await fs.writeFile(
+			buildFile,
+			"---\nname: build\ndescription: Custom primary\ntools: [read]\nspawns: []\n---\nCustom primary instructions.",
+		);
+		expect((await selectAgent("build")).status).toBe(200);
+		const customBuildState = await (await runtime.host.client(info.id)).getState();
+		expect(customBuildState.dumpTools?.map(tool => tool.name)).toEqual(["read", "yield"]);
+		expect(customBuildState.systemPrompt?.join("\n")).toContain("Custom primary instructions.");
+		await fs.unlink(buildFile);
+		expect((await selectAgent("browser-profile")).status).toBe(200);
+		expect((await selectAgent("build")).status).toBe(200);
+		const restoredState = await (await runtime.host.client(info.id)).getState();
+		expect(restoredState.systemPrompt?.join("\n")).not.toContain("Use the browser profile instructions.");
+		expect(restoredState.dumpTools?.some(tool => tool.name === "bash")).toBe(true);
+		const historyReader = new OpenChamberHost([], path.join(directory, "openchamber.db"), directory);
+		try {
+			const history = await historyReader.messages(info.id);
+			expect(history.find(message => message.info.id === profileShell.info.id)?.info.agent).toBe("browser-profile");
+			expect(history.find(message => message.info.id === shell.info.id)?.info.agent).toBe("build");
+		} finally {
+			await historyReader.close();
+		}
 		await runtime.host.remove(info.id);
 		expect(await runtime.host.list(directory)).toEqual([]);
 	} finally {
@@ -119,6 +553,33 @@ test("browser host persists sessions and runs local RPC commands without model r
 		await removeWithRetries(directory);
 	}
 }, 60_000);
+
+test("closing the browser host during startup reaps its worker and rejects new sessions", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-close-"));
+	const pidFile = path.join(directory, "worker.pid");
+	const envFile = path.join(directory, "worker.env");
+	await fs.writeFile(envFile, `MOCK_RPC_PID_FILE=${pidFile.replaceAll("\\", "/")}\n`);
+	const host = new OpenChamberHost(
+		[process.execPath, `--env-file=${envFile}`, path.join(import.meta.dir, "fixtures/mock-rpc-agent.ts")],
+		path.join(directory, "browser.db"),
+		directory,
+	);
+	try {
+		const info = await host.create(directory);
+		const starting = host.client(info.id);
+		const closing = host.close();
+		const result = await Promise.allSettled([starting, closing]);
+		expect(result[0].status).toBe("rejected");
+		expect(result[1].status).toBe("fulfilled");
+		const pid = Number(await fs.readFile(pidFile, "utf8"));
+		expect(() => process.kill(pid, 0)).toThrow();
+		await expect(host.client(info.id)).rejects.toThrow("closing");
+	} finally {
+		await host.close();
+		AgentStorage.close();
+		await removeWithRetries(directory);
+	}
+});
 
 test("synchronous browser requests preserve late quota failures", async () => {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-quota-"));
@@ -156,6 +617,7 @@ test("synchronous browser requests preserve late quota failures", async () => {
 test("streaming survives subscriber disconnect and client message IDs remain authoritative", async () => {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-stream-"));
 	let requests = 0;
+	const providerInputs: string[] = [];
 	let nextTool: { name: string; arguments: string } | undefined;
 	const queuedTools: { name: string; arguments: string }[] = [];
 	let holdNext = false;
@@ -166,6 +628,7 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 		async fetch(request) {
 			requests++;
 			const input = await request.text();
+			providerInputs.push(input);
 			const toolCall = input.includes("Nested test worker") ? queuedTools.shift() : nextTool;
 			if (toolCall === nextTool) nextTool = undefined;
 			const chunk = {
@@ -237,6 +700,7 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 	const options = {
 		port: 0,
 		password: crypto.randomUUID(),
+		legacySessionGuard: { processIds: [process.pid] },
 		dataDir: directory,
 		command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
 	};
@@ -249,6 +713,11 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 		}),
 	);
 	await fs.mkdir(path.join(directory, ".omp", "agents"), { recursive: true });
+	await fs.mkdir(path.join(directory, ".omp", "commands"), { recursive: true });
+	await fs.writeFile(
+		path.join(directory, ".omp", "commands", "browser-probe.md"),
+		"---\ndescription: Browser command probe\n---\nSay hello to $ARGUMENTS",
+	);
 	await fs.writeFile(
 		path.join(directory, ".omp", "agents", "nester.md"),
 		'---\nname: nester\ndescription: Nested task test\nspawns: "*"\n---\nNested test worker.',
@@ -270,18 +739,66 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 			if (event.payload.type === "session.idle") idle.resolve();
 		});
 		const browserDisconnect = runtime.host.onEvent(() => {});
-		await runtime.host.prompt(info.id, "Say hello", { providerID: "probe", modelID: "test" }, "msg_browser_request");
+		const commands = await fetch(new URL(`/command?directory=${encodeURIComponent(directory)}`, runtime.server.url), {
+			headers: { authorization: `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}` },
+		});
+		expect(commands.status).toBe(200);
+		expect(await commands.json()).toContainEqual(
+			expect.objectContaining({ name: "browser-probe", description: "Browser command probe" }),
+		);
+		expect(await runtime.host.list(directory)).toHaveLength(1);
+		const commandRequest = fetch(new URL(`/session/${info.id}/command`, runtime.server.url), {
+			method: "POST",
+			headers: {
+				authorization: `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({
+				command: "browser-probe",
+				agent: "nester",
+				arguments: "hello",
+				model: "probe/test",
+				messageID: "msg_browser_request",
+				parts: [
+					{ type: "text", text: "Hidden goal instruction", synthetic: true },
+					{
+						type: "file",
+						mime: "text/plain",
+						filename: "context.txt",
+						url: `data:text/plain;base64,${Buffer.from("Attached command context").toString("base64")}`,
+					},
+				],
+			}),
+		});
 		browserDisconnect();
+		expect((await commandRequest).status).toBe(200);
 		await idle.promise;
 		unsubscribe();
 		const messages = await runtime.host.messages(info.id);
+		expect(messages[0]?.parts).toContainEqual(
+			expect.objectContaining({ type: "text", text: "Hidden goal instruction", synthetic: true }),
+		);
+		expect(messages[0]?.parts).toContainEqual(expect.objectContaining({ type: "file", filename: "context.txt" }));
 		expect(runtime.host.get(info.id).metadata).toEqual({
 			openchamber: { goal: { id: "test-goal", status: "paused" } },
 		});
 		expect(messages[0]?.info.id).toBe("msg_browser_request");
+		expect(messages[0]?.info.agent).toBe("nester");
+		expect(messages.at(-1)?.info.agent).toBe("nester");
+		await runtime.host.prompt(info.id, "/session info", undefined, undefined, undefined, "build");
+		expect((await runtime.host.messages(info.id))[0]?.info.agent).toBe("nester");
+		const branch = await runtime.host.create(directory, "Agent history branch", info.id, messages.at(-1)?.info.id);
+		expect((await runtime.host.messages(branch.id))[0]?.info.agent).toBe("nester");
+		expect((await runtime.host.messages(branch.id))[0]?.parts).toContainEqual(
+			expect.objectContaining({ type: "text", text: "Hidden goal instruction", synthetic: true }),
+		);
+		await runtime.host.remove(branch.id);
 		expect(messages.at(-1)?.parts).toContainEqual(expect.objectContaining({ type: "text", text: "Hello from OMP" }));
 		await runtime.host.prompt(info.id, "Say hello", { providerID: "probe", modelID: "test" }, "msg_browser_request");
 		expect(requests).toBe(1);
+		expect(providerInputs[0]).toContain("Say hello to hello");
+		expect(providerInputs[0]).toContain("Attached command context");
+		expect(providerInputs[0]).toContain("Hidden goal instruction");
 		const parentIdle = Promise.withResolvers<void>();
 		const childIdle = Promise.withResolvers<void>();
 		const idleChildren = new Set<string>();
@@ -312,12 +829,33 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 		expect(grandchildren).toHaveLength(1);
 		expect(grandchildren[0].metadata).toMatchObject({ ompSubagent: { status: "completed" } });
 		expect(children[0].metadata).toMatchObject({ ompSubagent: { status: "completed" } });
+		const sibling = await runtime.host.create(directory, "Batch sibling", info.id);
+		await runtime.host.update(sibling.id, { metadata: children[0].metadata });
+		const parentHistory = await runtime.host.messages(info.id);
+		const childLinks = parentHistory
+			.flatMap(message => message.parts)
+			.find(
+				part =>
+					part.type === "tool" &&
+					part.state.status !== "pending" &&
+					Array.isArray(part.state.metadata?.sessionIDs) &&
+					part.state.metadata.sessionIDs.includes(sibling.id),
+			);
+		expect(childLinks).toMatchObject({
+			state: {
+				metadata: {
+					sessionID: children[0].id,
+					sessionIDs: [children[0].id, sibling.id],
+				},
+			},
+		});
+		await expect(runtime.host.client(children[0].id)).rejects.toThrow("Session is busy in another process");
 		expect(runtime.host.status()[children[0].id]).toEqual({ type: "idle" });
 		expect((await runtime.host.messages(children[0].id)).at(-1)?.parts).toContainEqual(
 			expect.objectContaining({ type: "text", text: "Hello from OMP" }),
 		);
 		await runtime.host.waitForIdle(info.id, AbortSignal.timeout(10_000));
-		const questionSeen = Promise.withResolvers<void>();
+		const questionSeen = Promise.withResolvers<string>();
 		const answeredIdle = Promise.withResolvers<void>();
 		const questionEvents = runtime.host.onEvent(event => {
 			if (
@@ -326,8 +864,7 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 				typeof event.payload.properties.id === "string"
 			) {
 				expect(runtime.host.questions()).toHaveLength(1);
-				runtime.host.answer(event.payload.properties.id, "Yes");
-				questionSeen.resolve();
+				questionSeen.resolve(event.payload.properties.id);
 			}
 			if (event.payload.type === "session.idle") answeredIdle.resolve();
 		});
@@ -343,7 +880,12 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 			{ providerID: "probe", modelID: "test" },
 			"msg_question_test",
 		);
-		await Promise.all([questionSeen.promise, answeredIdle.promise]);
+		const questionID = await questionSeen.promise;
+		await expect(
+			runtime.host.prompt(info.id, "Change agents", undefined, undefined, undefined, "scout"),
+		).rejects.toThrow("busy");
+		runtime.host.answer(questionID, "Yes");
+		await answeredIdle.promise;
 		questionEvents();
 		expect(runtime.host.questions()).toEqual([]);
 		const approvalSeen = Promise.withResolvers<void>();
@@ -428,3 +970,60 @@ test("streaming survives subscriber disconnect and client message IDs remain aut
 		await removeWithRetries(directory);
 	}
 }, 60_000);
+
+test("browser LSP status reports a real initialized worker only in its project", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-live-lsp-"));
+	await Bun.write(path.join(directory, "config.yml"), "lsp:\n  lazy: false\n  shared: false\n");
+	await Bun.write(
+		path.join(directory, "models.yml"),
+		JSON.stringify({ providers: { openai: { apiKey: "test-only", baseUrl: "http://127.0.0.1:1/v1" } } }),
+	);
+	await Bun.write(
+		path.join(directory, "lsp.json"),
+		JSON.stringify({
+			servers: {
+				"browser-lsp-probe": {
+					command: process.execPath,
+					args: [path.join(import.meta.dir, "fixtures/fake-lsp-server.ts")],
+					fileTypes: [".browserprobe"],
+					rootMarkers: ["lsp.json"],
+				},
+			},
+		}),
+	);
+	const password = crypto.randomUUID();
+	const runtime = await startOpenChamberServer({
+		port: 0,
+		password,
+		dataDir: directory,
+		command: [process.execPath, path.resolve(import.meta.dir, "../src/cli.ts")],
+	});
+	try {
+		const session = await runtime.host.create(directory);
+		const client = await runtime.host.client(session.id);
+		const deadline = Date.now() + 10_000;
+		let servers = await client.getLspStatus();
+		while (
+			!servers.some(server => server.name === process.execPath && server.status === "ready") &&
+			Date.now() < deadline
+		) {
+			await Bun.sleep(100);
+			servers = await client.getLspStatus();
+		}
+		expect(servers).toContainEqual(expect.objectContaining({ name: process.execPath, status: "ready" }));
+		const url = new URL(`/lsp?directory=${encodeURIComponent(directory)}`, runtime.server.url);
+		expect((await fetch(url)).status).toBe(401);
+		const response = await fetch(url, {
+			headers: { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` },
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toContainEqual(
+			expect.objectContaining({ name: process.execPath, status: "connected" }),
+		);
+		expect(await runtime.host.lspStatus(path.join(directory, "other-project"))).toEqual([]);
+	} finally {
+		await runtime.close();
+		AgentStorage.close();
+		await removeWithRetries(directory);
+	}
+}, 30_000);

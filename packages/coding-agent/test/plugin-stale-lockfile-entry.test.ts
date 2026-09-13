@@ -61,7 +61,11 @@ test("stale lockfile-only directory plugin is skipped while declared and linked 
 		version: "0.2.0",
 		omp: { extensions: ["ext.ts"] },
 	});
-	await fs.symlink(linkedSource, path.join(nodeModules, "linked-plugin"));
+	await fs.symlink(
+		linkedSource,
+		path.join(nodeModules, "linked-plugin"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
 
 	await writeJson(path.join(pluginsDir, "package.json"), {
 		dependencies: { "declared-plugin": "1.0.0" },

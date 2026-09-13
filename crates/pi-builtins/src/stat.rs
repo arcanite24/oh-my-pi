@@ -2990,6 +2990,12 @@ mod win_tests {
 	use super::Stat;
 	use crate::host::run_util;
 
+	fn tempdir() -> (tempfile::TempDir, PathBuf) {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().to_path_buf();
+		(dir, root)
+	}
+
 	fn run_in(cwd: PathBuf, args: Vec<&str>) -> (i32, String, String) {
 		let (code, capture) = run_util::<Stat>(&args, "", cwd);
 		(code, capture.out(), capture.err())

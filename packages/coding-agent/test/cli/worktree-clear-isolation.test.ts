@@ -46,7 +46,7 @@ describe("worktree clear task-isolation ownership", () => {
 
 	/** A pid that has been spawned and reaped, so `kill(pid, 0)` reports ESRCH. */
 	async function deadPid(): Promise<number> {
-		const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+		const proc = Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
 		await proc.exited;
 		return proc.pid;
 	}

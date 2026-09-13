@@ -1450,6 +1450,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
 	await sessionManager.acquireOwnership();
+	let sessionOwnsManager = false;
+	await using _startupOwnership = {
+		async [Symbol.asyncDispose]() {
+			if (sessionOwnsManager) return;
+			try {
+				await sessionManager.close();
+			} catch (error) {
+				logger.warn("Failed to release session ownership after startup error", { error: String(error) });
+			}
+		},
+	};
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");
@@ -4369,6 +4380,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
 
+		sessionOwnsManager = true;
 		return {
 			session,
 			extensionsResult,

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { resetSessionTitleIndexForTests } from "@oh-my-pi/pi-coding-agent/session/title-index";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -60,6 +61,7 @@ function getHeader(entries: unknown[]): SessionHeader | undefined {
 
 describe("session title source persistence", () => {
 	let testAgentDir: string;
+	const sessions: SessionManager[] = [];
 	let cwd: string;
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -71,7 +73,9 @@ describe("session title source persistence", () => {
 		setAgentDir(testAgentDir);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(sessions.splice(0).map(session => session.close()));
+		resetSessionTitleIndexForTests();
 		if (originalAgentDir) {
 			setAgentDir(originalAgentDir);
 		} else {
@@ -83,6 +87,7 @@ describe("session title source persistence", () => {
 
 	it("persists auto title source across reopen", async () => {
 		const session = SessionManager.create(cwd);
+		sessions.push(session);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		await session.setSessionName("Auto title", "auto");
 		session.appendMessage(makeAssistantMessage());
@@ -103,12 +108,14 @@ describe("session title source persistence", () => {
 		});
 		expect(parseJsonLine(rawLines[1]).type).toBe("session");
 		const reopened = await SessionManager.open(sessionFile!);
+		sessions.push(reopened);
 		expect(reopened.getSessionName()).toBe("Auto title");
 		expect(reopened.titleSource).toBe("auto");
 	});
 
 	it("persists user title source across reopen", async () => {
 		const session = SessionManager.create(cwd);
+		sessions.push(session);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		await session.setSessionName("Manual title", "user");
 		session.appendMessage(makeAssistantMessage());
@@ -121,6 +128,7 @@ describe("session title source persistence", () => {
 		expect(getHeader(entries)?.titleSource).toBe("user");
 
 		const reopened = await SessionManager.open(sessionFile!);
+		sessions.push(reopened);
 		expect(reopened.getSessionName()).toBe("Manual title");
 		expect(reopened.titleSource).toBe("user");
 	});
@@ -145,6 +153,7 @@ describe("session title source persistence", () => {
 		expect(getHeader(entries)?.titleSource).toBe("user");
 
 		const reopened = await SessionManager.open(file);
+		sessions.push(reopened);
 		expect(reopened.getSessionName()).toBe("Legacy title");
 		expect(reopened.titleSource).toBe("user");
 	});
@@ -152,6 +161,7 @@ describe("session title source persistence", () => {
 	it("renames slotted sessions by updating the fixed title slot and appending an audit entry", async () => {
 		const storage = new CountingTitleSlotStorage();
 		const session = SessionManager.create(cwd, undefined, storage);
+		sessions.push(session);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		await session.setSessionName("Auto title", "auto", "initial");
 		session.appendMessage(makeAssistantMessage());
@@ -185,6 +195,7 @@ describe("session title source persistence", () => {
 
 	it("notifies name-change subscribers only after successful applied names", async () => {
 		const session = SessionManager.inMemory(cwd);
+		sessions.push(session);
 		const names: Array<string | undefined> = [];
 		const unsubscribe = session.onSessionNameChanged(() => {
 			names.push(session.getSessionName());

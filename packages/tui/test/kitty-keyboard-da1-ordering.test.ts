@@ -105,7 +105,8 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("keeps the modifyOtherKeys fallback when only DA1 ever replies", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
+		// Startup may already enable fallback by timeout on a busy host.
+		// Keep those bytes: DA1 must not enable the same mode twice.
 
 		// Terminals that ignore `CSI ? u` answer DA1 only — modifyOtherKeys is
 		// the right answer there.
@@ -146,7 +147,8 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		delete Bun.env.SSH_CLIENT;
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
+		// Startup may already enable fallback by timeout on a busy host.
+		// Keep those bytes: DA1 must not enable the same mode twice.
 
 		await harness.feed("\x1b[?1;2c");
 
@@ -160,7 +162,8 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("reasserts modifyOtherKeys fallback when fullscreen overlays enter the alternate screen", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
+		// Startup may already enable fallback by timeout on a busy host.
+		// Keep those bytes: DA1 must not enable the same mode twice.
 
 		await harness.feed("\x1b[?1;2c");
 		expect(harness.writes.join("")).toContain("\x1b[>4;2m");

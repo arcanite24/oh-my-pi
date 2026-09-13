@@ -353,7 +353,7 @@ describe("MarketplaceManager", () => {
 		fs.mkdirSync(path.join(localPlugin, "tools"), { recursive: true });
 		const linkPath = path.join(ctx.tmpDir, "node_modules", "hello-plugin");
 		fs.rmSync(linkPath, { recursive: true, force: true });
-		fs.symlinkSync(localPlugin, linkPath, "dir");
+		fs.symlinkSync(localPlugin, linkPath, process.platform === "win32" ? "junction" : "dir");
 
 		const spies = mockPluginManagerPaths(ctx.tmpDir);
 		try {

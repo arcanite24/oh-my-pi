@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +27,22 @@ function resolveRepoBiome(): string | null {
 }
 
 const repoBiome = resolveRepoBiome();
+let fixtureDir: string;
+let fakeBiome: string;
+
+beforeAll(async () => {
+	fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-biome-"));
+	fakeBiome = path.join(fixtureDir, process.platform === "win32" ? "biome.exe" : "biome");
+	const result = await Bun.build({
+		entrypoints: [path.join(import.meta.dir, "fixtures/fake-biome.ts")],
+		compile: { outfile: fakeBiome },
+	});
+	if (!result.success) throw new Error(`Fake Biome build failed: ${result.logs.join("\n")}`);
+}, 30_000);
+
+afterAll(async () => {
+	await fs.rm(fixtureDir, { force: true, recursive: true });
+});
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { force: true, recursive: true })));
@@ -43,24 +59,11 @@ async function createFakeBiomeCommand(
 	expectedInput: string,
 	formattedOutput: string,
 ): Promise<string> {
-	const command = path.join(tempDir, "biome");
 	const expectedInputPath = path.join(tempDir, "expected-input.ts");
 	const formattedOutputPath = path.join(tempDir, "formatted-output.ts");
 	await Bun.write(expectedInputPath, expectedInput);
 	await Bun.write(formattedOutputPath, formattedOutput);
-	await Bun.write(
-		command,
-		`#!/bin/sh
-test "$1" = "format" || exit 7
-test "$2" = "--write" || exit 8
-test "$3" = "${path.join(tempDir, "example.ts")}" || exit 10
-cmp -s "$3" "${expectedInputPath}" || exit 9
-cp "${formattedOutputPath}" "$3"
-exit 0
-`,
-	);
-	await fs.chmod(command, 0o755);
-	return command;
+	return fakeBiome;
 }
 
 function biomeConfig(command: string): ServerConfig {
@@ -118,13 +121,10 @@ describe("BiomeClient format", () => {
 
 	test("returns the original content when Biome fails", async () => {
 		const tempDir = await makeTempDir();
-		const command = path.join(tempDir, "biome-failure");
-		await Bun.write(command, "#!/bin/sh\ncat >/dev/null\nexit 1\n");
-		await fs.chmod(command, 0o755);
 		const targetFile = path.join(tempDir, "example.ts");
 		const content = "export const value = 1;\n";
 
-		const result = await new BiomeClient(biomeConfig(command), tempDir).format(targetFile, content);
+		const result = await new BiomeClient(biomeConfig(fakeBiome), tempDir).format(targetFile, content);
 
 		expect(result).toBe(content);
 	});
@@ -133,15 +133,12 @@ describe("BiomeClient format", () => {
 describe("BiomeClient lint", () => {
 	test("cancels a hung Biome process when diagnostics are aborted", async () => {
 		const tempDir = await makeTempDir();
-		const command = path.join(tempDir, "biome-hang");
-		await Bun.write(command, "#!/bin/sh\nwhile :; do :; done\n");
-		await fs.chmod(command, 0o755);
 		const targetFile = path.join(tempDir, "example.ts");
 		const started = Date.now();
 
 		let rejected = false;
 		try {
-			await new BiomeClient(biomeConfig(command), tempDir).lint(targetFile, AbortSignal.timeout(50));
+			await new BiomeClient(biomeConfig(fakeBiome), tempDir).lint(targetFile, AbortSignal.timeout(50));
 		} catch {
 			rejected = true;
 		}

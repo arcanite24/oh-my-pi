@@ -80,13 +80,14 @@ async function withCachePath(run: (cachePath: string) => Promise<void>): Promise
 }
 
 describe("auth-broker snapshot cache", () => {
-	test("round-trips an encrypted snapshot and writes mode 0600", async () => {
+	test("round-trips an encrypted snapshot with restrictive POSIX permissions where supported", async () => {
 		await withCachePath(async cachePath => {
 			const snapshot = makeSnapshot(1_000_000);
 			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });
 
 			const stat = await fs.stat(cachePath);
-			expect(stat.mode & 0o777).toBe(0o600);
+			// Windows file mode bits do not represent NTFS access control.
+			if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o600);
 			const payload = await fs.readFile(cachePath);
 			expect(payload[CACHE_VERSION_OFFSET]).toBe(CURRENT_CACHE_VERSION);
 			expect(new TextDecoder().decode(payload)).not.toContain("secret-api-key");

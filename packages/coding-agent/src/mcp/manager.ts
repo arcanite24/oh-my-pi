@@ -1006,7 +1006,12 @@ export class MCPManager {
 	 */
 	getAllServerNames(): string[] {
 		return Array.from(
-			new Set([...this.#sources.keys(), ...this.#connections.keys(), ...this.#pendingConnections.keys()]),
+			new Set([
+				...this.#serverConfigs.keys(),
+				...this.#sources.keys(),
+				...this.#connections.keys(),
+				...this.#pendingConnections.keys(),
+			]),
 		);
 	}
 
@@ -1041,12 +1046,14 @@ export class MCPManager {
 	/**
 	 * Disconnect from a specific server.
 	 */
-	async disconnectServer(name: string): Promise<void> {
+	async disconnectServer(name: string, options?: { preserveConfig?: boolean }): Promise<void> {
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
-		this.#sources.delete(name);
-		this.#serverConfigs.delete(name);
+		if (!options?.preserveConfig) {
+			this.#sources.delete(name);
+			this.#serverConfigs.delete(name);
+		}
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
 

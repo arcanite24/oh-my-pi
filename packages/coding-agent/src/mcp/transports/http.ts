@@ -19,6 +19,7 @@ import type {
 import { toJsonRpcError } from "../../mcp/types";
 import {
 	createMCPJsonRpcError,
+	mcpHttpStatusError,
 	type MCPFailureStage,
 	MCPTransportError,
 	mcpTraceIdFromHeaders,
@@ -469,24 +470,7 @@ export class HttpTransport implements MCPTransport {
 
 			if (!response.ok) {
 				const text = await response.text();
-				const wwwAuthenticate = response.headers.get("WWW-Authenticate");
-				const mcpAuthServer = response.headers.get("Mcp-Auth-Server");
-				const authHints = [
-					wwwAuthenticate ? `WWW-Authenticate: ${wwwAuthenticate}` : null,
-					mcpAuthServer ? `Mcp-Auth-Server: ${mcpAuthServer}` : null,
-				]
-					.filter(Boolean)
-					.join("; ");
-				const suffix = authHints ? ` [${authHints}]` : "";
-				throw new MCPTransportError({
-					transport: "http",
-					stage,
-					failure: "http_status",
-					message: `HTTP ${response.status}: ${text}${suffix}`,
-					retryable: response.status === 404 || response.status === 502 || response.status === 503,
-					code: response.status,
-					traceId,
-				});
+				throw mcpHttpStatusError(response, text, stage, traceId);
 			}
 
 			const contentType = response.headers.get("Content-Type") ?? "";

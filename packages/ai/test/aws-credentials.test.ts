@@ -39,10 +39,8 @@ const ENV_KEYS = [
 ] as const;
 
 function quoteForConfig(p: string): string {
-	if (!/[\s"]/.test(p)) return p;
-	// Wrap in double quotes; our tokenizer preserves backslashes so Windows
-	// paths survive without further escaping.
-	return `"${p.replace(/(["])/g, "\\$1")}"`;
+	// Quote paths even without spaces: bare Windows backslashes are escapes.
+	return JSON.stringify(p);
 }
 
 describe("tokenizeCredentialProcessCommand", () => {

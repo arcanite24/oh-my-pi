@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -359,13 +360,15 @@ for (const mode of ["TUI", "headless"] as const) {
 
 		it("discards a pending rename after switching away and back to the same session", async () => {
 			const storage = new MemorySessionStorage();
-			const source = SessionManager.create("/tmp/rename-switch", "/sessions", storage);
+			const cwd = path.resolve("/tmp/rename-switch");
+			const sessionDir = path.resolve("/sessions");
+			const source = SessionManager.create(cwd, sessionDir, storage);
 			const { session, sessionManager, execute, ctx, runtime } = createRuntime(mode, undefined, source);
 			const output = mode === "TUI" ? vi.spyOn(ctx, "showStatus") : vi.spyOn(runtime, "output");
 			await source.ensureOnDisk();
 			await source.flush();
 			const sourceFile = source.getSessionFile()!;
-			const other = SessionManager.create("/tmp/rename-switch", "/sessions", storage);
+			const other = SessionManager.create(cwd, sessionDir, storage);
 			await other.ensureOnDisk();
 			const otherFile = other.getSessionFile()!;
 			await other.close();

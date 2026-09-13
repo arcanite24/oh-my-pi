@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { startOpenChamberServer } from "../packages/coding-agent/src/web/openchamber-server";
+import { parseLegacySessionGuard } from "../packages/coding-agent/src/web/openchamber-host";
 
 const password = process.env.OPENCODE_SERVER_PASSWORD;
 if (!password) throw new Error("OPENCODE_SERVER_PASSWORD is required");
@@ -15,6 +16,10 @@ const runtime = await startOpenChamberServer({
 	command,
 	dataDir: process.env.OMP_WEB_DATA_DIR,
 	authDbPath: process.env.OMP_WEB_AUTH_DB,
+	browserOrigin: process.env.OMP_WEB_BROWSER_ORIGIN,
+	legacySessionGuard: process.env.OMP_WEB_LEGACY_GUARD
+		? parseLegacySessionGuard(JSON.parse(process.env.OMP_WEB_LEGACY_GUARD))
+		: undefined,
 });
 process.stdout.write(`OMP browser backend listening on 127.0.0.1:${runtime.server.port}\n`);
 for (const signal of ["SIGINT", "SIGTERM"] as const)

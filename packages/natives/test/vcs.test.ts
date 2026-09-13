@@ -32,6 +32,7 @@ async function repository() {
 	await git(root, "init", "-b", "main");
 	await git(root, "config", "user.name", "Native Test");
 	await git(root, "config", "user.email", "native@example.test");
+	await git(root, "config", "core.autocrlf", "false");
 	await writeFile(join(root, "tracked.txt"), "one\ntwo\n");
 	await git(root, "add", "tracked.txt");
 	await git(root, "commit", "-m", "initial");
@@ -58,8 +59,9 @@ describe("in-process VCS bindings", () => {
 		expect(await repo.isDirty()).toBe(true);
 	});
 
-	test("discovers, diffs, applies, stages, and commits", async () => {
+	test.each([false, true])("discovers, diffs, applies, stages, and commits (autocrlf=%s)", async autocrlf => {
 		const root = await repository();
+		await git(root, "config", "core.autocrlf", String(autocrlf));
 		const nested = join(root, "nested");
 		await mkdir(nested);
 		await writeFile(join(nested, "untracked.txt"), "new\n");
@@ -82,7 +84,7 @@ describe("in-process VCS bindings", () => {
 		await git(root, "restore", "tracked.txt");
 		expect(await repo!.canApplyPatch(nativePatch, {})).toBe(true);
 		await repo!.applyPatch(nativePatch, {});
-		expect(await Bun.file(join(root, "tracked.txt")).text()).toBe("one\nchanged\n");
+		expect(await Bun.file(join(root, "tracked.txt")).text()).toBe(autocrlf ? "one\r\nchanged\r\n" : "one\nchanged\n");
 
 		await repo!.stageFiles(["tracked.txt"]);
 		const sha = await repo!.commitCreate("native commit", {});

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -185,9 +185,13 @@ describe("SessionManager temp cwd session dirs", () => {
 	beforeEach(() => {
 		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-dir-test-"));
 		setAgentDir(testAgentDir);
+		// Windows temp normally lives under home; keep this fixture in the
+		// temp-only branch rather than changing production path precedence.
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(testAgentDir, "unrelated-home"));
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		if (originalAgentDir) {
 			setAgentDir(originalAgentDir);
 		} else {

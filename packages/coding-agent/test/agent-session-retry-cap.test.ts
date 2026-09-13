@@ -654,6 +654,8 @@ describe("AgentSession retry delay cap", () => {
 		});
 		await localStorage.reload();
 		await localStorage.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
+		const reports = await localStorage.fetchUsageReports();
+		expect(reports).toHaveLength(1);
 		return localStorage;
 	}
 
@@ -668,10 +670,19 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 7_200_000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -692,6 +703,11 @@ describe("AgentSession retry delay cap", () => {
 				},
 				streamFn: (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						void localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -713,7 +729,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 7_000_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 7_200_000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -752,10 +777,19 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 7200000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -776,6 +810,11 @@ describe("AgentSession retry delay cap", () => {
 				},
 				streamFn: (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						void localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -797,7 +836,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 200_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 7200000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -834,10 +882,19 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -858,6 +915,11 @@ describe("AgentSession retry delay cap", () => {
 				},
 				streamFn: (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						void localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -879,7 +941,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 200_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 300000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -896,6 +967,7 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(290_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(300_000);
 			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 290_000)).toBe(true);
+			expect(lastAssistant(session).errorMessage).toBeUndefined();
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -922,22 +994,24 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
-			// An earlier usage-limit response on a sibling session (same
-			// shared credential, single entry so it stays usable) established
-			// the longer block before this session's failing turn. The key
-			// resolution binds the credential to the sibling session, as a
-			// real prior turn would have.
+			// Bind both requests while eligible. The stream fixture delivers the
+			// sibling's limit response before the current request reports its limit.
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 			await localRegistry.getApiKeyForProvider("opencode-go", "sibling-session");
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
-				retryAfterMs: 7_200_000,
-				providerTimed: true,
-			});
 
 			const mock = createMockModel({
 				responses: [
@@ -954,8 +1028,18 @@ describe("AgentSession retry delay cap", () => {
 					tools: [],
 					messages: [],
 				},
-				streamFn: (requestedModel, context, options) => {
+				streamFn: async (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						// A sibling reports its limit after this request selected an eligible key.
+						await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+							retryAfterMs: 7_200_000,
+							providerTimed: true,
+						});
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						await localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -977,7 +1061,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 200_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1019,20 +1112,25 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 			await localRegistry.getApiKeyForProvider("opencode-go", "sibling-session");
 			// The sibling's 20-minute provider-stated block is shorter than
 			// the 30-minute heuristic this session's hintless error will
 			// contribute, so the merged deadline alone cannot distinguish it.
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
-				retryAfterMs: 1_200_000,
-				providerTimed: true,
-			});
 
 			const mock = createMockModel({
 				responses: [
@@ -1049,8 +1147,22 @@ describe("AgentSession retry delay cap", () => {
 					tools: [],
 					messages: [],
 				},
-				streamFn: (requestedModel, context, options) => {
+				streamFn: async (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						// A sibling reports its limit after this request selected an eligible key.
+						await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+							retryAfterMs: 1_200_000,
+							providerTimed: true,
+						});
+						// A later heuristic must not erase the earlier hard deadline.
+						await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+							retryAfterMs: 1_800_000,
+						});
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						await localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -1072,7 +1184,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 200_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1113,18 +1234,24 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-		);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(now + 300_000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 			await localRegistry.getApiKeyForProvider("opencode-go", "sibling-session");
 			// Hintless sibling error whose report was unavailable: the stored
 			// block is the 30-minute heuristic fallback, not provider timing.
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
-				retryAfterMs: 1_800_000,
-			});
 
 			const mock = createMockModel({
 				responses: [
@@ -1141,8 +1268,17 @@ describe("AgentSession retry delay cap", () => {
 					tools: [],
 					messages: [],
 				},
-				streamFn: (requestedModel, context, options) => {
+				streamFn: async (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					if (requestedModels.length === 1) {
+						// A sibling reports its limit after this request selected an eligible key.
+						await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+							retryAfterMs: 1_800_000,
+						});
+						weekly.status = "rate-limited";
+						weekly.percent = 100;
+						await localStorage.invalidateUsageCache("opencode-go");
+					}
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -1164,7 +1300,16 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 200_000) return originalWait(delay, options);
+				now += delay + 1;
+				rolling.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.resetsAtIso = new Date(now + 300_000).toISOString();
+				weekly.status = "ok";
+				weekly.percent = 0;
+				await localStorage.invalidateUsageCache("opencode-go");
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1194,126 +1339,64 @@ describe("AgentSession retry delay cap", () => {
 		}
 	});
 
-	it("ignores a persisted heuristic prior block after a restart", async () => {
-		// Contract: persisted credential blocks carry no provenance. A
-		// 30-minute heuristic guess persisted before a restart must not read
-		// as provider timing afterwards — a fresh complete ~5-minute report
-		// wins, instead of sleeping ~25 minutes past the known reset.
-		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
-		if (!exhaustedModel) {
-			throw new Error("Expected bundled OpenCode Go test model to exist");
-		}
-
-		const windowPayload = (status: "ok" | "rate-limited", resetsAtIso: string): Record<string, unknown> => ({
-			status,
-			percent: 100,
-			resetsAt: resetsAtIso,
-		});
-		const usageOptions = {
-			usageProviderResolver: (provider: string) =>
-				provider === "opencode-go" ? opencodeGoUsageProvider : undefined,
-			usageFetch: (async () =>
-				new Response(
-					JSON.stringify({
+	it.each([false, true])(
+		"reconciles restarted pool cooldowns while preserving hard deadlines (%s)",
+		async providerTimed => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let exhausted = false;
+			const resetAt = now + 300_000;
+			const filename = path.join(tempDir.path(), `restart-pool-${providerTimed}.db`);
+			const usageOptions = {
+				usageProviderResolver: (provider: string) =>
+					provider === "opencode-go" ? opencodeGoUsageProvider : undefined,
+				usageFetch: (async () =>
+					Response.json({
 						usage: {
-							rolling: windowPayload("ok", new Date(Date.now() + 300_000).toISOString()),
-							weekly: windowPayload("rate-limited", new Date(Date.now() + 300_000).toISOString()),
-							monthly: {
-								status: "ok",
-								percent: 8,
-								resetsAt: new Date(Date.now() + 30 * 24 * 3_600_000).toISOString(),
+							rolling: { status: "ok", percent: 12, resetsAt: new Date(now + 3_600_000).toISOString() },
+							weekly: {
+								status: exhausted ? "rate-limited" : "ok",
+								percent: exhausted ? 100 : 12,
+								resetsAt: new Date(exhausted ? resetAt : now + 3_600_000).toISOString(),
 							},
+							monthly: { status: "ok", percent: 8, resetsAt: new Date(now + 30 * 24 * 3_600_000).toISOString() },
 						},
-					}),
-					{ status: 200, headers: { "content-type": "application/json" } },
-				)) as unknown as typeof fetch,
-		};
-
-		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		const priorStorage = new AuthStorage(store, usageOptions);
-		const restartedStorage = new AuthStorage(store, usageOptions);
-		try {
-			await priorStorage.reload();
-			await restartedStorage.reload();
-			await priorStorage.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
-			await restartedStorage.reload();
-			// Pre-restart hintless sibling response with no report reset: the
-			// stored block is the 30-minute heuristic guess (no providerTimed).
-			await priorStorage.getApiKey("opencode-go", "sibling-session");
-			await priorStorage.markUsageLimitReached("opencode-go", "sibling-session", {
-				retryAfterMs: 1_800_000,
-			});
-
-			const localRegistry = new ModelRegistry(restartedStorage, path.join(tempDir.path(), "models.yml"));
-
-			const mock = createMockModel({
-				responses: [
-					{ throw: "429 quota exceeded for this account" },
-					{ content: ["recovered after short reported reset"], stopReason: "stop" },
-				],
-			});
-			const requestedModels: string[] = [];
-			const agent = new Agent({
-				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
-				initialState: {
-					model: exhaustedModel,
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-				streamFn: (requestedModel, context, options) => {
-					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-					return mock.stream(requestedModel, context, options);
-				},
-			});
-
-			const settings = Settings.isolated({
-				"compaction.enabled": false,
-				"retry.baseDelayMs": 5,
-				"retry.maxDelayMs": 100,
-				"retry.maxRetries": 2,
-				"retry.modelFallback": false,
-				"retry.waitForUsageReset": true,
-			});
-			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
-
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry: localRegistry,
-			});
-
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-			const retryStartEvents: AutoRetryStartEvent[] = [];
-			const retryEndEvents: AutoRetryEndEvent[] = [];
-			session.subscribe(event => {
-				if (event.type === "auto_retry_start") retryStartEvents.push(event);
-				if (event.type === "auto_retry_end") retryEndEvents.push(event);
-			});
-
-			await session.prompt("Trigger hintless usage limit after a restart over a heuristic block");
-			await session.waitForIdle();
-
-			// The fresh ~5-minute report wins over the stale persisted
-			// 30-minute heuristic guess.
-			expect(retryStartEvents).toHaveLength(1);
-			expect(retryStartEvents[0].delayMs).toBeGreaterThan(290_000);
-			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(300_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 290_000)).toBe(true);
-			expect(requestedModels).toEqual([
-				`${exhaustedModel.provider}/${exhaustedModel.id}`,
-				`${exhaustedModel.provider}/${exhaustedModel.id}`,
-			]);
-			expect(retryEndEvents).toHaveLength(1);
-			expect(retryEndEvents[0]).toMatchObject({ success: true });
-			expect(lastAssistant(session).stopReason).toBe("stop");
-			expect(session.isRetrying).toBe(false);
-		} finally {
-			priorStorage.close();
-			restartedStorage.close();
-		}
-	});
+					})) as unknown as typeof fetch,
+			};
+			const prior = new AuthStorage(new SqliteAuthCredentialStore(new Database(filename)), usageOptions);
+			try {
+				await prior.reload();
+				await prior.set("opencode-go", { type: "api_key", key: "restart-fixture-key" });
+				await prior.getApiKey("opencode-go", "prior-session");
+				await prior.markUsageLimitReached("opencode-go", "prior-session", {
+					retryAfterMs: 1_800_000,
+					providerTimed,
+				});
+			} finally {
+				prior.close();
+			}
+			exhausted = true;
+			const restarted = new AuthStorage(new SqliteAuthCredentialStore(new Database(filename)), usageOptions);
+			try {
+				await restarted.reload();
+				await restarted.invalidateUsageCache("opencode-go");
+				// Refreshing usage cannot authorize a stream while the account is spent.
+				await expect(restarted.getApiKey("opencode-go", "new-session")).rejects.toThrow();
+				const pool = await restarted.getCredentialPool("opencode-go");
+				expect(pool.accounts[0].blockedUntil).toBe(providerTimed ? now + 1_800_000 : resetAt);
+				now = resetAt + 1;
+				exhausted = false;
+				await restarted.invalidateUsageCache("opencode-go");
+				if (providerTimed) {
+					await expect(restarted.getApiKey("opencode-go", "new-session")).rejects.toThrow();
+				} else {
+					expect(await restarted.getApiKey("opencode-go", "new-session")).toBe("restart-fixture-key");
+				}
+			} finally {
+				restarted.close();
+			}
+		},
+	);
 
 	it("fails fast when a co-exhausted window has no future reset despite a timed one", async () => {
 		// Contract: a report is authoritative only when EVERY exhausted
@@ -1326,10 +1409,17 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
-		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() - 3_600_000).toISOString() },
-		);
+		const rolling: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(Date.now() + 7_200_000).toISOString(),
+		};
+		const weekly: OpencodeWindowSpec = {
+			status: "ok",
+			percent: 12,
+			resetsAtIso: new Date(Date.now() + 3_600_000).toISOString(),
+		};
+		const localStorage = await createOpencodeStorageWithUsage(rolling, weekly);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -1343,8 +1433,14 @@ describe("AgentSession retry delay cap", () => {
 					tools: [],
 					messages: [],
 				},
-				streamFn: (requestedModel, context, options) => {
+				streamFn: async (requestedModel, context, options) => {
 					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					rolling.status = "rate-limited";
+					rolling.percent = 100;
+					weekly.status = "rate-limited";
+					weekly.percent = 100;
+					weekly.resetsAtIso = new Date(Date.now() - 3_600_000).toISOString();
+					await localStorage.invalidateUsageCache("opencode-go");
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -1365,7 +1461,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = vi.spyOn(scheduler, "wait");
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1382,7 +1478,7 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryEndEvents[0]).toMatchObject({ success: false });
 			expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
 			for (const call of waitSpy.mock.calls) {
-				expect(call[0]).toBeLessThanOrEqual(100);
+				expect(call[0]).toBeLessThan(1_000_000);
 			}
 			const last = lastAssistant(session);
 			expect(last.stopReason).toBe("error");
@@ -1498,78 +1594,94 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
 		}
 
-		await authStorage.set("opencode-go", [
-			{ type: "api_key", key: "opencode-go-key-1" },
-			{ type: "api_key", key: "opencode-go-key-2" },
-		]);
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
-		await modelRegistry.getApiKeyForProvider("opencode-go", "other-session");
-		const blocked = await authStorage.markUsageLimitReached("opencode-go", "other-session", {
-			retryAfterMs: 2_000,
-		});
-		expect(blocked.switched).toBe(true);
-		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const localStorage = await createOpencodeStorageWithUsage(
+			{ status: "ok", percent: 12, resetsAtIso: new Date(now + 300_000).toISOString() },
+			{ status: "ok", percent: 12, resetsAtIso: new Date(now + 7_200_000).toISOString() },
+		);
+		const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
+		try {
+			await localStorage.set("opencode-go", [
+				{ type: "api_key", key: "opencode-go-key-1" },
+				{ type: "api_key", key: "opencode-go-key-2" },
+			]);
+			expect(await localStorage.fetchUsageReports()).toHaveLength(2);
+			localStorage.setRuntimeApiKey("openai", "openai-test-key");
+			await localRegistry.getApiKeyForProvider("opencode-go", "other-session");
+			const blocked = await localStorage.markUsageLimitReached("opencode-go", "other-session", {
+				retryAfterMs: 2_000,
+			});
+			expect(blocked.switched).toBe(true);
+			const usageLimitSpy = vi.spyOn(localStorage, "markUsageLimitReached");
 
-		const mock = createMockModel();
-		const requestedModels: string[] = [];
-		const agent = new Agent({
-			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
-			initialState: {
-				model: exhaustedModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				mock.push(
-					requestedModels.length === 1
-						? {
-								throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
-							}
-						: { content: ["recovered after sibling unblock"], stopReason: "stop" },
-				);
-				return mock.stream(requestedModel, context, options);
-			},
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.maxDelayMs": 300_000,
-			"retry.maxRetries": 2,
-			"retry.modelFallback": true,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
-		});
-		settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
+			const mock = createMockModel();
+			const requestedModels: string[] = [];
+			const agent = new Agent({
+				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
+				initialState: {
+					model: exhaustedModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: (requestedModel, context, options) => {
+					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					mock.push(
+						requestedModels.length === 1
+							? {
+									throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+								}
+							: { content: ["recovered after sibling unblock"], stopReason: "stop" },
+					);
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxDelayMs": 300_000,
+				"retry.maxRetries": 2,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
-		});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
+			const originalWait = scheduler.wait.bind(scheduler);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+				if (delay < 1_000 || delay > 3_000) return originalWait(delay, options);
+				now += delay + 1;
+			});
+			const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+			});
 
-		await session.prompt("Trigger the long OpenCode Go limit while a sibling is briefly blocked");
-		await session.waitForIdle();
-		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
-		const usageLimitResult = usageLimitSpy.mock.results[0]?.value;
-		expect(usageLimitResult).toBeDefined();
-		expect(await usageLimitResult).toMatchObject({ retryAtMs: expect.any(Number), switched: false });
+			await session.prompt("Trigger the long OpenCode Go limit while a sibling is briefly blocked");
+			await session.waitForIdle();
+			expect(usageLimitSpy).toHaveBeenCalledTimes(1);
+			const usageLimitResult = usageLimitSpy.mock.results[0]?.value;
+			expect(usageLimitResult).toBeDefined();
+			expect(await usageLimitResult).toMatchObject({ retryAtMs: expect.any(Number), switched: false });
 
-		expect(requestedModels).toEqual([
-			`${exhaustedModel.provider}/${exhaustedModel.id}`,
-			`${exhaustedModel.provider}/${exhaustedModel.id}`,
-		]);
-		expect(fallbackEvents).toEqual([]);
-		expect(waitSpy.mock.calls.some(call => call[0] >= 1_000 && call[0] <= 3_000)).toBe(true);
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "recovered after sibling unblock",
-		});
+			expect(requestedModels).toEqual([
+				`${exhaustedModel.provider}/${exhaustedModel.id}`,
+				`${exhaustedModel.provider}/${exhaustedModel.id}`,
+			]);
+			expect(fallbackEvents).toEqual([]);
+			expect(waitSpy.mock.calls.some(call => call[0] >= 1_000 && call[0] <= 3_000)).toBe(true);
+			expect(lastAssistant(session).content).toContainEqual({
+				type: "text",
+				text: "recovered after sibling unblock",
+			});
+		} finally {
+			localStorage.close();
+		}
 	});
 
 	it("honors the reason backoff for a transient rate-limit 429 without a provider hint", async () => {

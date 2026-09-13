@@ -4,6 +4,8 @@
 
 mod count_fast {
 	use std::io::{self, ErrorKind, Read};
+	#[cfg(windows)]
+	use std::io::{Seek, SeekFrom};
 	#[cfg(unix)]
 	use std::os::fd::AsRawFd;
 	
@@ -115,10 +117,12 @@ mod count_fast {
 				if let Ok(metadata) = file.metadata() {
 					let attributes = metadata.file_attributes();
 	
-					if (attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
-						|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0
+					if ((attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
+						|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0)
+						&& let Ok(current) = file.stream_position()
+						&& file.seek(SeekFrom::End(0)).is_ok()
 					{
-						return (metadata.file_size() as usize, None);
+						return (metadata.file_size().saturating_sub(current) as usize, None);
 					}
 				}
 			}

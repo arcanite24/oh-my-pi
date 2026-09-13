@@ -4,19 +4,22 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getAgentDir, getSessionsDir, isRecord } from "@oh-my-pi/pi-utils";
 import type { Session } from "@opencode-ai/sdk/v2";
+import type { LspServerStatus } from "../lsp/client";
 import { RpcClient, RpcCommandError } from "../modes/rpc/rpc-client";
-import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "../modes/rpc/rpc-types";
+import type { RpcAvailableSlashCommand, RpcExtensionUIRequest, RpcExtensionUIResponse } from "../modes/rpc/rpc-types";
 import { buildSessionContext } from "../session/session-context";
 import { loadSessionFile } from "../session/session-loader";
 import { listAllSessions } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
-import { browserMessageId, browserMessages, type BrowserMessage } from "./openchamber-messages";
+import { discoverAgents } from "../task/discovery";
+import { browserMessageId, browserMessages, type BrowserMessage, type BrowserPromptPart } from "./openchamber-messages";
 
 interface StoredSession {
 	id: string;
 	file: string;
 	info: string;
 	deleted: number;
+	browser_created: number;
 }
 interface LiveSession {
 	client: RpcClient;
@@ -24,10 +27,25 @@ interface LiveSession {
 	busy: boolean;
 	pending: Map<string, RpcExtensionUIRequest>;
 	pendingMessageID?: string;
+	pendingParts?: BrowserPromptPart[];
+	pendingInput?: { id: string; text: string; parts?: BrowserPromptPart[]; created: number };
 }
 export interface BrowserEvent {
 	directory: string;
 	payload: { type: string; properties: object };
+}
+export interface LegacySessionGuard {
+	processIds: number[];
+}
+
+export function parseLegacySessionGuard(value: unknown): LegacySessionGuard {
+	if (
+		!isRecord(value) ||
+		!Array.isArray(value.processIds) ||
+		value.processIds.some(pid => !Number.isSafeInteger(pid) || pid <= 0)
+	)
+		throw new Error("Invalid legacy session guard");
+	return { processIds: value.processIds };
 }
 
 /** Owns RPC processes independently of browser connections; transcripts remain OMP files. */
@@ -35,6 +53,9 @@ export class OpenChamberHost {
 	#db: Database;
 	#live = new Map<string, LiveSession>();
 	#starting = new Map<string, Promise<LiveSession>>();
+	#submitting = new Set<string>();
+	#closing = false;
+	#closePromise?: Promise<void>;
 	#failures = new Map<string, Error>();
 	#children = new Map<string, { parentID: string; busy: boolean; messages: AgentMessage[] }>();
 	#listeners = new Set<(event: BrowserEvent) => void>();
@@ -42,12 +63,28 @@ export class OpenChamberHost {
 		readonly command: string[],
 		dbPath = path.join(getAgentDir(), "openchamber.db"),
 		readonly agentDir = getAgentDir(),
+		readonly legacyGuard?: LegacySessionGuard,
 	) {
+		if (legacyGuard) parseLegacySessionGuard(legacyGuard);
 		this.#db = new Database(dbPath, { create: true });
 		this.#db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
 			CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, file TEXT NOT NULL, info TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
 			CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, session_id TEXT NOT NULL);
-			CREATE TABLE IF NOT EXISTS message_ids(session_id TEXT NOT NULL, native_id TEXT NOT NULL, client_id TEXT NOT NULL, PRIMARY KEY(session_id,native_id));`);
+			CREATE TABLE IF NOT EXISTS command_outputs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS message_agents(session_id TEXT NOT NULL, native_id TEXT NOT NULL, agent TEXT NOT NULL, PRIMARY KEY(session_id,native_id));
+			CREATE TABLE IF NOT EXISTS message_ids(session_id TEXT NOT NULL, native_id TEXT NOT NULL, client_id TEXT NOT NULL, PRIMARY KEY(session_id,native_id));
+			CREATE TABLE IF NOT EXISTS message_parts(session_id TEXT NOT NULL, native_id TEXT NOT NULL, parts TEXT NOT NULL, PRIMARY KEY(session_id,native_id));`);
+		this.#db
+			.transaction(() => {
+				if (
+					!this.#db
+						.query<{ name: string }, []>("PRAGMA table_info(sessions)")
+						.all()
+						.some(column => column.name === "browser_created")
+				)
+					this.#db.exec("ALTER TABLE sessions ADD COLUMN browser_created INTEGER NOT NULL DEFAULT 0");
+			})
+			.immediate();
 	}
 	onEvent(listener: (event: BrowserEvent) => void): () => void {
 		this.#listeners.add(listener);
@@ -136,9 +173,21 @@ export class OpenChamberHost {
 				title,
 				version: "omp",
 				parentID,
+				agent: parentID ? this.get(parentID).agent : undefined,
 				time: { created: Date.now(), updated: Date.now() },
 			};
 			this.#save(info, file);
+			this.#db.run("UPDATE sessions SET browser_created=1 WHERE id=?", [info.id]);
+			if (parentID) {
+				this.#db.run("INSERT INTO message_agents SELECT ?,native_id,agent FROM message_agents WHERE session_id=?", [
+					info.id,
+					parentID,
+				]);
+				this.#db.run("INSERT INTO message_parts SELECT ?,native_id,parts FROM message_parts WHERE session_id=?", [
+					info.id,
+					parentID,
+				]);
+			}
 			this.emit(info, "session.created", { info });
 			return info;
 		} finally {
@@ -171,12 +220,41 @@ export class OpenChamberHost {
 				"SELECT native_id,client_id FROM message_ids WHERE session_id=?",
 			)
 			.all(info.id);
-		const converted = browserMessages(
-			info,
-			messages,
-			streaming,
-			new Map(ids.map(row => [row.native_id, row.client_id])),
+		const clientIds = new Map(ids.map(row => [row.native_id, row.client_id]));
+		const converted = browserMessages(info, messages, streaming, clientIds);
+		const displayParts = new Map(
+			this.#db
+				.query<{ native_id: string; parts: string }, [string]>(
+					"SELECT native_id,parts FROM message_parts WHERE session_id=?",
+				)
+				.all(info.id)
+				.map(row => [
+					clientIds.get(row.native_id) ?? `${row.native_id}_${info.id}`,
+					JSON.parse(row.parts) as BrowserPromptPart[],
+				]),
 		);
+		for (const message of converted) {
+			const parts = displayParts.get(message.info.id);
+			if (message.info.role === "user" && parts)
+				message.parts = parts.map((part, index) => ({
+					...part,
+					id: `prt_${message.info.id.slice(4)}_${index}`,
+					messageID: message.info.id,
+					sessionID: info.id,
+				}));
+		}
+		const agents = new Map(
+			this.#db
+				.query<{ native_id: string; agent: string }, [string]>(
+					"SELECT native_id,agent FROM message_agents WHERE session_id=?",
+				)
+				.all(info.id)
+				.map(row => [clientIds.get(row.native_id) ?? `${row.native_id}_${info.id}`, row.agent]),
+		);
+		for (const message of converted) {
+			message.info.agent = agents.get(message.info.id) ?? (info.parentID ? info.agent : undefined) ?? "build";
+			if (message.info.role === "assistant") message.info.mode = message.info.agent;
+		}
 		const children = this.#db
 			.query<{ info: string }, [string]>(
 				"SELECT info FROM sessions WHERE deleted=0 AND json_extract(info,'$.parentID')=?",
@@ -193,11 +271,20 @@ export class OpenChamberHost {
 						part.callID === details.parentToolCallId &&
 						part.state.status !== "pending"
 					) {
-						part.state.metadata = { ...part.state.metadata, sessionID: child.id };
+						const metadata = part.state.metadata;
+						const sessionIDs = Array.isArray(metadata?.sessionIDs)
+							? metadata.sessionIDs.filter((value): value is string => typeof value === "string")
+							: [];
+						if (!sessionIDs.includes(child.id)) sessionIDs.push(child.id);
+						part.state.metadata = { ...metadata, sessionID: sessionIDs[0], sessionIDs };
 					}
 				}
 		}
-		return converted;
+		for (const row of this.#db
+			.query<{ message: string }, [string]>("SELECT message FROM command_outputs WHERE session_id=?")
+			.all(info.id))
+			converted.push(JSON.parse(row.message) as BrowserMessage);
+		return converted.sort((a, b) => a.info.time.created - b.info.time.created);
 	}
 	async #transcript(id: string): Promise<AgentMessage[]> {
 		const loaded = await loadSessionFile(this.#row(id).file);
@@ -207,12 +294,44 @@ export class OpenChamberHost {
 			.messages;
 	}
 	status(): Record<string, { type: "busy" | "idle" }> {
-		return Object.fromEntries(
-			[...this.#live, ...this.#children].map(([id, live]) => [id, { type: live.busy ? "busy" : "idle" }]),
-		);
+		return Object.fromEntries([
+			...[...this.#live, ...this.#children].map(([id, live]) => [id, { type: live.busy ? "busy" : "idle" }]),
+			...[...this.#submitting].map(id => [id, { type: "busy" }]),
+		]);
 	}
 	async client(id: string): Promise<RpcClient> {
 		return (await this.#ensureLive(id)).client;
+	}
+	async lspStatus(directory: string): Promise<(LspServerStatus & { id: string })[]> {
+		const matches = (id: string) => path.relative(this.get(id).directory, directory) === "";
+		await Promise.all([...this.#starting].filter(([id]) => matches(id)).map(([, pending]) => pending));
+		const snapshots = await Promise.all(
+			[...this.#live]
+				.filter(([id]) => matches(id))
+				.map(async ([id, live]) =>
+					(await live.client.getLspStatus()).map((server, index) => ({ ...server, id: `${id}:${index}` })),
+				),
+		);
+		return snapshots.flat();
+	}
+	async commands(directory: string): Promise<RpcAvailableSlashCommand[]> {
+		for (const [id, live] of this.#live) {
+			if (path.resolve(this.get(id).directory) === path.resolve(directory))
+				return live.client.getAvailableCommands();
+		}
+		const client = new RpcClient({
+			command: this.command,
+			ui: true,
+			cwd: directory,
+			args: ["--no-session"],
+			env: { PI_CODING_AGENT_DIR: this.agentDir },
+		});
+		try {
+			await client.start();
+			return await client.getAvailableCommands();
+		} finally {
+			await client.stop();
+		}
 	}
 	async waitForIdle(id: string, signal: AbortSignal): Promise<void> {
 		const failure = this.#failures.get(id);
@@ -243,13 +362,32 @@ export class OpenChamberHost {
 		const completedFailure = this.#failures.get(id);
 		if (completedFailure) throw completedFailure;
 	}
-	async #ensureLive(id: string): Promise<LiveSession> {
+	async #ensureLive(id: string, agent?: string): Promise<LiveSession> {
+		if (this.#closing) throw new Error("Browser host is closing");
 		if (this.#children.get(id)?.busy) throw new Error("Subagent is busy; control it through its parent session");
-		const existing = this.#live.get(id);
-		if (existing) return existing;
 		const pending = this.#starting.get(id);
-		if (pending) return pending;
-		const promise = this.#start(id);
+		if (pending) {
+			await pending;
+			return this.#ensureLive(id, agent);
+		}
+		const existing = this.#live.get(id);
+		if (existing && (agent === undefined || agent === (this.get(id).agent ?? "build"))) return existing;
+		if (existing?.busy) throw new Error("Session is busy; wait before changing agents");
+		if (!existing && this.legacyGuard && this.#row(id).browser_created !== 1) {
+			const legacyRunning = this.legacyGuard.processIds.some(pid => {
+				try {
+					process.kill(pid, 0);
+					return true;
+				} catch (error) {
+					return !isRecord(error) || error.code !== "ESRCH";
+				}
+			});
+			if (legacyRunning)
+				throw new Error(
+					"Session is protected while legacy OMP processes are running; create a new browser session or wait for them to finish",
+				);
+		}
+		const promise = this.#start(id, agent);
 		this.#starting.set(id, promise);
 		try {
 			return await promise;
@@ -257,14 +395,32 @@ export class OpenChamberHost {
 			this.#starting.delete(id);
 		}
 	}
-	async #start(id: string): Promise<LiveSession> {
+	async #start(id: string, agent?: string): Promise<LiveSession> {
 		const info = this.get(id);
+		if (agent !== undefined) info.agent = agent;
+		const selectedAgent = info.agent ?? "build";
+		const { agents } = await discoverAgents(info.directory);
+		const hasDefinition = agents.some(definition => definition.name === selectedAgent);
+		if (!hasDefinition && selectedAgent !== "build") throw new Error("Unknown agent definition");
+		const existing = this.#live.get(id);
+		if (existing) {
+			for (const child of this.#children.values()) {
+				if (!child.busy) continue;
+				let parentID: string | undefined = child.parentID;
+				while (parentID) {
+					if (parentID === id) throw new Error("Subagents are running; wait before changing agents");
+					parentID = this.#children.get(parentID)?.parentID;
+				}
+			}
+			await existing.client.stop();
+			this.#live.delete(id);
+		}
 		const row = this.#row(id);
 		const client = new RpcClient({
 			command: this.command,
 			ui: true,
 			cwd: info.directory,
-			args: ["--session", row.file],
+			args: ["--session", row.file, ...(hasDefinition ? ["--agent-definition", selectedAgent] : [])],
 			env: { PI_CODING_AGENT_DIR: this.agentDir },
 		});
 		const live: LiveSession = { client, messages: [], busy: false, pending: new Map() };
@@ -302,8 +458,65 @@ export class OpenChamberHost {
 			this.emit(info, "session.status", { sessionID: id, status: { type: "idle" } });
 			this.emit(info, "session.idle", { sessionID: id });
 		});
+		client.onCommandOutput(text => {
+			const messageID = `msg_${crypto.randomUUID()}`;
+			const now = Date.now();
+			const message: BrowserMessage = {
+				info: {
+					id: messageID,
+					sessionID: id,
+					role: "assistant",
+					parentID: live.pendingMessageID ?? "",
+					agent: info.agent ?? "build",
+					mode: info.agent ?? "build",
+					providerID: "omp",
+					modelID: "command",
+					finish: "stop",
+					path: { cwd: info.directory, root: info.directory },
+					time: { created: now, completed: now },
+					cost: 0,
+					tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+				},
+				parts: [{ id: `prt_${messageID}`, messageID, sessionID: id, type: "text", text }],
+			};
+			this.#db.run("INSERT INTO command_outputs VALUES(?,?,?)", [messageID, id, JSON.stringify(message)]);
+			this.emit(info, "message.updated", { info: message.info });
+			for (const part of message.parts) this.emit(info, "message.part.updated", { part });
+		});
 		client.onPromptResult(agentInvoked => {
 			if (agentInvoked) return;
+			const pending = live.pendingInput;
+			if (pending) {
+				const message: BrowserMessage = {
+					info: {
+						id: pending.id,
+						sessionID: id,
+						role: "user",
+						model: {
+							providerID: info.model?.providerID ?? "",
+							modelID: info.model?.id ?? "",
+						},
+						time: { created: pending.created },
+						agent: info.agent ?? "build",
+					},
+					parts: (pending.parts?.length ? pending.parts : [{ type: "text" as const, text: pending.text }]).map(
+						(part, index) => ({
+							...part,
+							id: `prt_${pending.id.slice(4)}_${index}`,
+							messageID: pending.id,
+							sessionID: id,
+						}),
+					),
+				};
+				this.#db.run("INSERT OR REPLACE INTO command_outputs VALUES(?,?,?)", [
+					pending.id,
+					id,
+					JSON.stringify(message),
+				]);
+			}
+			live.pendingInput = undefined;
+			live.pendingMessageID = undefined;
+			live.pendingParts = undefined;
 			live.busy = false;
 			this.emit(info, "session.status", { sessionID: id, status: { type: "idle" } });
 			this.emit(info, "session.idle", { sessionID: id });
@@ -311,6 +524,20 @@ export class OpenChamberHost {
 		client.onEvent(event => {
 			if (event.type === "agent_start") live.busy = true;
 			if (event.type === "message_start" || event.type === "message_update" || event.type === "message_end") {
+				if (
+					event.type === "message_start" &&
+					(event.message.role === "user" || event.message.role === "assistant")
+				) {
+					const occurrence = live.messages.filter(
+						message => message.role === event.message.role && message.timestamp === event.message.timestamp,
+					).length;
+					const messageID = browserMessageId(event.message, occurrence);
+					this.#db.run("INSERT OR REPLACE INTO message_agents VALUES(?,?,?)", [
+						id,
+						messageID,
+						info.agent ?? "build",
+					]);
+				}
 				if (event.type === "message_start" && event.message.role === "user" && live.pendingMessageID) {
 					const occurrence = live.messages.filter(
 						message => message.role === "user" && message.timestamp === event.message.timestamp,
@@ -320,7 +547,15 @@ export class OpenChamberHost {
 						browserMessageId(event.message, occurrence),
 						live.pendingMessageID,
 					]);
+					if (live.pendingParts)
+						this.#db.run("INSERT OR REPLACE INTO message_parts VALUES(?,?,?)", [
+							id,
+							browserMessageId(event.message, occurrence),
+							JSON.stringify(live.pendingParts),
+						]);
 					live.pendingMessageID = undefined;
+					live.pendingParts = undefined;
+					live.pendingInput = undefined;
 				}
 				const index =
 					event.type === "message_start"
@@ -399,6 +634,7 @@ export class OpenChamberHost {
 			child.parentID = parentID;
 			child.time.updated = Date.now();
 			this.#save(child, payload.sessionFile);
+			this.#db.run("UPDATE sessions SET browser_created=1 WHERE id=?", [childID]);
 			this.#children.set(childID, {
 				parentID,
 				busy: payload.status === "started",
@@ -444,9 +680,14 @@ export class OpenChamberHost {
 		});
 		try {
 			await client.start();
+			if (this.#closing) throw new Error("Browser host is closing");
 			live.messages = await this.#transcript(id);
 			await client.setSubagentSubscription("events");
+			const current = this.get(id);
+			current.agent = info.agent;
+			this.#save(current);
 			this.#live.set(id, live);
+			this.emit(current, "session.updated", { info: current });
 			return live;
 		} catch (error) {
 			await client.stop();
@@ -507,27 +748,45 @@ export class OpenChamberHost {
 		model?: { providerID: string; modelID: string },
 		requestID?: string,
 		images?: ImageContent[],
+		agent?: string,
+		displayParts?: BrowserPromptPart[],
 	): Promise<void> {
 		if (requestID && this.#db.query("SELECT id FROM requests WHERE id=? AND session_id=?").get(requestID, id)) return;
-		const live = await this.#ensureLive(id);
-		if (live.busy) throw new Error("Session is busy; steer or wait for the current turn");
-		this.#failures.delete(id);
-		live.busy = true;
+		if (this.#submitting.has(id)) throw new Error("Session is busy submitting a request");
+		const info = this.get(id);
+		this.#submitting.add(id);
+		this.emit(info, "session.status", { sessionID: id, status: { type: "busy" } });
 		try {
-			live.messages = await this.#transcript(id);
-			if (model) {
-				await live.client.setModel(model.providerID, model.modelID);
-				const info = this.get(id);
-				info.model = { providerID: model.providerID, id: model.modelID };
-				this.#save(info);
+			const live = await this.#ensureLive(id, agent);
+			if (live.busy) throw new Error("Session is busy; steer or wait for the current turn");
+			this.#failures.delete(id);
+			live.busy = true;
+			try {
+				live.messages = await this.#transcript(id);
+				if (model) {
+					await live.client.setModel(model.providerID, model.modelID);
+					const info = this.get(id);
+					info.model = { providerID: model.providerID, id: model.modelID };
+					this.#save(info);
+				}
+				if (requestID) this.#db.run("INSERT INTO requests VALUES(?,?)", [requestID, id]);
+				live.pendingMessageID = requestID;
+				live.pendingParts = displayParts;
+				live.pendingInput = {
+					id: requestID ?? `msg_${crypto.randomUUID()}`,
+					text,
+					parts: displayParts,
+					created: Date.now(),
+				};
+				await live.client.prompt(text, images);
+			} catch (error) {
+				live.busy = false;
+				// Do not retry ambiguous prompt delivery automatically.
+				throw error;
 			}
-			if (requestID) this.#db.run("INSERT INTO requests VALUES(?,?)", [requestID, id]);
-			live.pendingMessageID = requestID;
-			await live.client.prompt(text, images);
-		} catch (error) {
-			live.busy = false;
-			// Do not retry ambiguous prompt delivery automatically.
-			throw error;
+		} finally {
+			this.#submitting.delete(id);
+			this.emit(info, "session.status", { sessionID: id, status: this.status()[id] ?? { type: "idle" } });
 		}
 	}
 	async update(
@@ -555,7 +814,15 @@ export class OpenChamberHost {
 		try {
 			await live.client.bash(command);
 			live.messages = await this.#transcript(id);
-			const message = this.#convert(info, live.messages).at(-1);
+			const nativeMessage = live.messages.at(-1);
+			if (nativeMessage?.role !== "bashExecution") throw new Error("Shell command did not produce a transcript");
+			const occurrence =
+				live.messages.filter(
+					entry => entry.role === nativeMessage.role && entry.timestamp === nativeMessage.timestamp,
+				).length - 1;
+			const nativeID = browserMessageId(nativeMessage, occurrence);
+			this.#db.run("INSERT OR REPLACE INTO message_agents VALUES(?,?,?)", [id, nativeID, info.agent ?? "build"]);
+			const message = this.#convert(info, live.messages).find(entry => entry.info.id === `${nativeID}_${id}`);
 			if (!message) throw new Error("Shell command did not produce a transcript");
 			this.emit(info, "message.updated", { info: message.info });
 			for (const part of message.parts) this.emit(info, "message.part.updated", { part });
@@ -567,6 +834,7 @@ export class OpenChamberHost {
 		}
 	}
 	async remove(id: string): Promise<void> {
+		if (this.#starting.has(id) || this.#submitting.has(id)) throw new Error("Session is busy starting a request");
 		const info = this.get(id);
 		const live = this.#live.get(id);
 		if (live?.busy || this.#children.get(id)?.busy) throw new Error("Abort the active session before deleting it");
@@ -577,7 +845,12 @@ export class OpenChamberHost {
 		this.#db.run("UPDATE sessions SET deleted=1 WHERE id=?", [id]);
 		this.emit(info, "session.deleted", { info });
 	}
-	async close(): Promise<void> {
+	close(): Promise<void> {
+		this.#closing = true;
+		return (this.#closePromise ??= this.#close());
+	}
+	async #close(): Promise<void> {
+		await Promise.allSettled(this.#starting.values());
 		await Promise.all([...this.#live.values()].map(live => live.client.stop()));
 		this.#live.clear();
 		this.#children.clear();

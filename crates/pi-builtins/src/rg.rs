@@ -815,14 +815,14 @@ fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
 	&bytes[start..]
 }
 
-/// Writes a display path, substituting `separator` for `/` when requested via
-/// `--path-separator`.
+/// Writes a display path, substituting `separator` for native path separators
+/// when requested via `--path-separator`.
 fn write_display_bytes<W: Write>(out: &mut W, bytes: &[u8], separator: Option<u8>) -> io::Result<()> {
 	let Some(separator) = separator else {
 		return out.write_all(bytes);
 	};
 	let mut rest = bytes;
-	while let Some(pos) = rest.iter().position(|&byte| byte == b'/') {
+	while let Some(pos) = rest.iter().position(|&byte| matches!(byte, b'/' | b'\\')) {
 		out.write_all(&rest[..pos])?;
 		out.write_all(&[separator])?;
 		rest = &rest[pos + 1..];
@@ -1323,6 +1323,9 @@ fn process_file<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
+	if host.is_stdout_file(path) {
+		return Ok(SearchOutcome { any_match: false, had_error: false });
+	}
 	let result = if cli.search_zip && !cli.no_search_zip {
 		let builder = DecompressionReaderBuilder::new();
 		if builder.get_matcher().has_command(path) {

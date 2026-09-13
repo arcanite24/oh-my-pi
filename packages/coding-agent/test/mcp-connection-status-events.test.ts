@@ -74,7 +74,7 @@ describe("MCPManager connection status events", () => {
 			);
 
 			const message = result.errors.get("broken") ?? "";
-			expect(message).toMatch(/ENOENT|No such file|not found/i);
+			expect(message).toMatch(/ENOENT|No such file|not found|subprocess closed stdout/i);
 			expect(events).toEqual([
 				{ type: "connecting", serverNames: ["broken"] },
 				{

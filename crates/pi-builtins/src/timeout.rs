@@ -127,7 +127,15 @@ impl SpawnRecorder {
 /// any case) or a signal number.
 fn parse_signal(spec: &str) -> Option<TrapSignal> {
 	let parsed = if let Ok(number) = spec.trim().parse::<i32>() {
-		TrapSignal::try_from(number).ok()?
+		TrapSignal::try_from(number).ok().or_else(|| {
+			match number {
+				2 => Some("INT"),
+				9 => Some("KILL"),
+				15 => Some("TERM"),
+				_ => None,
+			}
+			.and_then(|name| TrapSignal::try_from(name).ok())
+		})?
 	} else {
 		TrapSignal::try_from(spec).ok()?
 	};
@@ -275,7 +283,7 @@ impl builtins::Command for TimeoutCommand {
 			// external children it degrades to SIGKILL — see `Process::wait`.
 			child_cancel.cancel();
 		}
-		let mut killed = signal.as_str() == "SIGKILL";
+		let mut killed = signal_display(signal) == "KILL";
 
 		// Wait for the command to finish, escalating to SIGKILL after
 		// `--kill-after`. Without `-k`, GNU waits indefinitely — a command
@@ -336,7 +344,12 @@ impl builtins::Command for TimeoutCommand {
 			// unreliable. Report death by the delivered signal (128+N, or 137
 			// after escalation) deterministically, matching GNU for a command
 			// taken down by the timeout signal.
-			let number = i32::try_from(signal).unwrap_or(15);
+			let number = match signal_display(signal) {
+				"INT" => 2,
+				"KILL" => 9,
+				"TERM" => 15,
+				_ => i32::try_from(signal).unwrap_or(15),
+			};
 			let code = if killed {
 				EXIT_KILLED
 			} else {

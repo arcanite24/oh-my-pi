@@ -83,7 +83,7 @@ describe("plugin config", () => {
 			}),
 		);
 		await fs.mkdir(path.dirname(pluginPath), { recursive: true });
-		await fs.symlink(installPath, pluginPath, "dir");
+		await fs.symlink(installPath, pluginPath, process.platform === "win32" ? "junction" : "dir");
 		await Bun.write(
 			path.join(pluginsDir, "installed_plugins.json"),
 			JSON.stringify({
@@ -132,7 +132,7 @@ describe("plugin config", () => {
 			}),
 		);
 		await fs.mkdir(path.dirname(pluginPath), { recursive: true });
-		await fs.symlink(installPath, pluginPath, "dir");
+		await fs.symlink(installPath, pluginPath, process.platform === "win32" ? "junction" : "dir");
 		await Bun.write(
 			path.join(pluginsDir, "installed_plugins.json"),
 			JSON.stringify({
@@ -169,7 +169,7 @@ describe("plugin config", () => {
 			}),
 		);
 		await fs.mkdir(path.dirname(projectPluginPath), { recursive: true });
-		await fs.symlink(projectInstallPath, projectPluginPath, "dir");
+		await fs.symlink(projectInstallPath, projectPluginPath, process.platform === "win32" ? "junction" : "dir");
 		await Bun.write(
 			path.join(projectPluginsDir, "omp-plugins.lock.json"),
 			JSON.stringify({
@@ -211,7 +211,11 @@ describe("plugin config", () => {
 		});
 		const projectRoot = path.join(tmpRoot, ".omp", "plugins");
 		await fs.mkdir(path.join(projectRoot, "node_modules"), { recursive: true });
-		await fs.symlink(installPath, path.join(projectRoot, "node_modules", "omp-commit"), "dir");
+		await fs.symlink(
+			installPath,
+			path.join(projectRoot, "node_modules", "omp-commit"),
+			process.platform === "win32" ? "junction" : "dir",
+		);
 		await Bun.write(
 			path.join(projectRoot, "omp-plugins.lock.json"),
 			JSON.stringify({

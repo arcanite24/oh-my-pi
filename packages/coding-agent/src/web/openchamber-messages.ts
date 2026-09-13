@@ -1,5 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message, Part, Session } from "@opencode-ai/sdk/v2";
+import type { FilePart, Message, Part, Session, TextPart } from "@opencode-ai/sdk/v2";
+
+export type BrowserPromptPart =
+	| Pick<TextPart, "type" | "text" | "synthetic">
+	| Pick<FilePart, "type" | "mime" | "url" | "filename">;
 
 export interface BrowserMessage {
 	info: Message;

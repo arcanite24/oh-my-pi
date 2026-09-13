@@ -31,148 +31,152 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	const repo = vcs.requireGit(cwd);
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
 
-	process.stdout.write("● Resolving model...\n");
-	const modelRegistry = new ModelRegistry(authStorage);
-	await modelRegistry.refresh();
-	await loadCliExtensionProviders(modelRegistry, settings, cwd);
-	const stagedFilesPromise = (async () => {
-		let stagedFiles = await repo.changedFiles({ cached: true });
+	try {
+		process.stdout.write("● Resolving model...\n");
+		const modelRegistry = new ModelRegistry(authStorage);
+		await modelRegistry.refresh();
+		await loadCliExtensionProviders(modelRegistry, settings, cwd);
+		const stagedFilesPromise = (async () => {
+			let stagedFiles = await repo.changedFiles({ cached: true });
+			if (stagedFiles.length === 0) {
+				process.stdout.write("No staged changes detected, staging all changes...\n");
+				await repo.stageFiles([]);
+				stagedFiles = await repo.changedFiles({ cached: true });
+			}
+			return stagedFiles;
+		})();
+
+		const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
+		const [primaryModelResult, stagedFiles] = await Promise.all([primaryModelPromise, stagedFilesPromise]);
+		const { model: primaryModel, thinkingLevel: primaryThinkingLevel } = primaryModelResult;
+		process.stdout.write(`  └─ ${primaryModel.name}\n`);
+
 		if (stagedFiles.length === 0) {
-			process.stdout.write("No staged changes detected, staging all changes...\n");
-			await repo.stageFiles([]);
-			stagedFiles = await repo.changedFiles({ cached: true });
-		}
-		return stagedFiles;
-	})();
-
-	const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
-	const [primaryModelResult, stagedFiles] = await Promise.all([primaryModelPromise, stagedFilesPromise]);
-	const { model: primaryModel, thinkingLevel: primaryThinkingLevel } = primaryModelResult;
-	process.stdout.write(`  └─ ${primaryModel.name}\n`);
-
-	if (stagedFiles.length === 0) {
-		if (args.push) {
-			process.stdout.write("No changes to commit; pushing existing commits...\n");
-			await pushOrAbort(cwd);
+			if (args.push) {
+				process.stdout.write("No changes to commit; pushing existing commits...\n");
+				await pushOrAbort(cwd);
+				return { usedFallback: false };
+			}
+			process.stderr.write("No changes to commit.\n");
 			return { usedFallback: false };
 		}
-		process.stderr.write("No changes to commit.\n");
-		return { usedFallback: false };
-	}
 
-	if (!args.noChangelog) {
-		process.stdout.write("● Detecting changelog targets...\n");
-	}
-	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
-		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
-		discoverContextFiles(cwd),
-		repo
-			.numstat({ cached: true })
-			.then(entries =>
-				entries.map(entry => ({ path: entry.path, additions: entry.added ?? 0, deletions: entry.removed ?? 0 })),
-			),
-		repo.diffText({ cached: true }),
-	]);
-	const changelogTargets = changelogBoundaries.map(boundary => boundary.changelogPath);
-	if (!args.noChangelog) {
-		if (changelogTargets.length > 0) {
-			for (const path of changelogTargets) {
-				process.stdout.write(`  └─ ${path}\n`);
+		if (!args.noChangelog) {
+			process.stdout.write("● Detecting changelog targets...\n");
+		}
+		const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
+			args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
+			discoverContextFiles(cwd),
+			repo
+				.numstat({ cached: true })
+				.then(entries =>
+					entries.map(entry => ({ path: entry.path, additions: entry.added ?? 0, deletions: entry.removed ?? 0 })),
+				),
+			repo.diffText({ cached: true }),
+		]);
+		const changelogTargets = changelogBoundaries.map(boundary => boundary.changelogPath);
+		if (!args.noChangelog) {
+			if (changelogTargets.length > 0) {
+				for (const path of changelogTargets) {
+					process.stdout.write(`  └─ ${path}\n`);
+				}
+			} else {
+				process.stdout.write("  └─ (none found)\n");
+			}
+		}
+
+		process.stdout.write("● Discovering context files...\n");
+
+		const contextMdFiles = contextFiles.filter(
+			file => file.path.endsWith("AGENTS.md") || file.path.endsWith("CLAUDE.md"),
+		);
+		if (contextMdFiles.length > 0) {
+			for (const file of contextMdFiles) {
+				process.stdout.write(`  └─ ${file.path}\n`);
 			}
 		} else {
 			process.stdout.write("  └─ (none found)\n");
 		}
-	}
-
-	process.stdout.write("● Discovering context files...\n");
-
-	const contextMdFiles = contextFiles.filter(
-		file => file.path.endsWith("AGENTS.md") || file.path.endsWith("CLAUDE.md"),
-	);
-	if (contextMdFiles.length > 0) {
-		for (const file of contextMdFiles) {
-			process.stdout.write(`  └─ ${file.path}\n`);
+		const forceFallback = $env.PI_COMMIT_TEST_FALLBACK?.toLowerCase() === "true";
+		if (forceFallback) {
+			process.stdout.write("● Forcing fallback commit generation...\n");
+			const fallbackProposal = generateFallbackProposal(numstat);
+			await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+			return { usedFallback: true };
 		}
-	} else {
-		process.stdout.write("  └─ (none found)\n");
-	}
-	const forceFallback = $env.PI_COMMIT_TEST_FALLBACK?.toLowerCase() === "true";
-	if (forceFallback) {
-		process.stdout.write("● Forcing fallback commit generation...\n");
-		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
-		return { usedFallback: true };
-	}
 
-	const trivialChange = detectTrivialChange(diff);
-	if (trivialChange) {
-		process.stdout.write(`● Detected trivial change: ${trivialChange.summary}\n`);
-		const trivialProposal: CommitProposal = {
-			analysis: {
-				type: trivialChange.type,
-				scope: null,
-				details: [],
-				issueRefs: [],
-			},
-			summary: trivialChange.summary,
-			warnings: [],
-		};
-		await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, push: args.push });
-		return { usedFallback: false };
-	}
-
-	let existingChangelogEntries: ExistingChangelogEntries[] | undefined;
-	if (!args.noChangelog && changelogTargets.length > 0) {
-		existingChangelogEntries = await loadExistingChangelogEntries(changelogTargets);
-		if (existingChangelogEntries.length === 0) {
-			existingChangelogEntries = undefined;
+		const trivialChange = detectTrivialChange(diff);
+		if (trivialChange) {
+			process.stdout.write(`● Detected trivial change: ${trivialChange.summary}\n`);
+			const trivialProposal: CommitProposal = {
+				analysis: {
+					type: trivialChange.type,
+					scope: null,
+					details: [],
+					issueRefs: [],
+				},
+				summary: trivialChange.summary,
+				warnings: [],
+			};
+			await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, push: args.push });
+			return { usedFallback: false };
 		}
-	}
 
-	process.stdout.write("● Starting commit agent...\n");
-	let agentSessionCompleted = false;
-	let usedFallback = false;
+		let existingChangelogEntries: ExistingChangelogEntries[] | undefined;
+		if (!args.noChangelog && changelogTargets.length > 0) {
+			existingChangelogEntries = await loadExistingChangelogEntries(changelogTargets);
+			if (existingChangelogEntries.length === 0) {
+				existingChangelogEntries = undefined;
+			}
+		}
 
-	try {
-		await runCommitAgentSession({
-			cwd,
-			model: primaryModel,
-			thinkingLevel: primaryThinkingLevel,
-			settings,
-			modelRegistry,
-			authStorage,
-			userContext: args.context,
-			contextFiles,
-			changelogTargets,
-			requireChangelog: !args.noChangelog && changelogTargets.length > 0,
-			diffText: diff,
-			existingChangelogEntries,
-			onComplete: async commitState => {
-				agentSessionCompleted = true;
-				usedFallback = await completeAgentCommitState(commitState, {
-					cwd,
-					dryRun: args.dryRun,
-					push: args.push,
-					noChangelog: args.noChangelog,
-					changelogTargets,
-					numstat,
-				});
-			},
-		});
-		return { usedFallback };
-	} catch (error) {
-		if (agentSessionCompleted) {
-			throw error;
+		process.stdout.write("● Starting commit agent...\n");
+		let agentSessionCompleted = false;
+		let usedFallback = false;
+
+		try {
+			await runCommitAgentSession({
+				cwd,
+				model: primaryModel,
+				thinkingLevel: primaryThinkingLevel,
+				settings,
+				modelRegistry,
+				authStorage,
+				userContext: args.context,
+				contextFiles,
+				changelogTargets,
+				requireChangelog: !args.noChangelog && changelogTargets.length > 0,
+				diffText: diff,
+				existingChangelogEntries,
+				onComplete: async commitState => {
+					agentSessionCompleted = true;
+					usedFallback = await completeAgentCommitState(commitState, {
+						cwd,
+						dryRun: args.dryRun,
+						push: args.push,
+						noChangelog: args.noChangelog,
+						changelogTargets,
+						numstat,
+					});
+				},
+			});
+			return { usedFallback };
+		} catch (error) {
+			if (agentSessionCompleted) {
+				throw error;
+			}
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`Agent error: ${errorMessage}\n`);
+			if (error instanceof Error && error.stack && $env.DEBUG) {
+				process.stderr.write(`${error.stack}\n`);
+			}
+			process.stdout.write("● Using fallback commit generation...\n");
+			const fallbackProposal = generateFallbackProposal(numstat);
+			await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+			return { usedFallback: true };
 		}
-		const errorMessage = error instanceof Error ? error.message : String(error);
-		process.stderr.write(`Agent error: ${errorMessage}\n`);
-		if (error instanceof Error && error.stack && $env.DEBUG) {
-			process.stderr.write(`${error.stack}\n`);
-		}
-		process.stdout.write("● Using fallback commit generation...\n");
-		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
-		return { usedFallback: true };
+	} finally {
+		authStorage.close();
 	}
 }
 

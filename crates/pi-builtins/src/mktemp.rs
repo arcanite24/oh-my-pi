@@ -566,7 +566,7 @@ mod tests {
 
 	use clap::Parser;
 
-	use super::Mktemp;
+	use super::{Mktemp, TMPDIR_ENV_VAR};
 	use crate::host::{Host, Utility};
 
 	fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
@@ -607,7 +607,7 @@ mod tests {
 	}
 
 	fn tmpdir_env(dir: &Path) -> [(&str, &str); 1] {
-		[("TMPDIR", dir.to_str().unwrap())]
+		[(TMPDIR_ENV_VAR, dir.to_str().unwrap())]
 	}
 
 	#[test]
@@ -771,7 +771,10 @@ mod tests {
 		assert_eq!(stdout, "");
 		assert_eq!(
 			stderr,
-			"mktemp: failed to create file via template 'missing-dir/foo.XXXX': No such file or directory\n"
+			format!(
+				"mktemp: failed to create file via template '{}': No such file or directory\n",
+				Path::new("missing-dir").join("foo.XXXX").display()
+			)
 		);
 	}
 

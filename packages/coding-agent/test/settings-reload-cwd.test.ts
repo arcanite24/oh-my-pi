@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getProjectAgentDir, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -228,6 +229,7 @@ describe("Settings.reloadForCwd", () => {
 
 		afterEach(() => {
 			resetSettingsForTest();
+			AgentStorage.close();
 			if (fs.existsSync(testDir)) {
 				removeSyncWithRetries(testDir);
 			}

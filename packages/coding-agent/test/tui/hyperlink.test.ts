@@ -462,8 +462,12 @@ describe("resource links in chat markdown", () => {
 
 	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
 		await Bun.write(path.join(tempDir, "local", "report.json"), "{}");
-		await Bun.write(path.join(tempDir, "outside.json"), "{}");
-		await fs.symlink(path.join(tempDir, "outside.json"), path.join(tempDir, "local", "escape.json"));
+		await Bun.write(path.join(tempDir, "outside", "report.json"), "{}");
+		await fs.symlink(
+			path.join(tempDir, "outside"),
+			path.join(tempDir, "local", "escape"),
+			process.platform === "win32" ? "junction" : "dir",
+		);
 		const text = [
 			"`[code](local://report.json)`",
 			"![image](local://report.json)",
@@ -471,7 +475,7 @@ describe("resource links in chat markdown", () => {
 			"[fenced](local://report.json)",
 			"```",
 			"[missing](local://missing.json)",
-			"[escape](local://escape.json)",
+			"[escape](local://escape/report.json)",
 			"[remote](mcp://server/resource)",
 			"[web](https://example.com/report)",
 		].join("\n\n");

@@ -13,6 +13,7 @@ import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -43,6 +44,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			authStorage.close();
 		}
 		authStoragesToClose.length = 0;
+		AgentStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}

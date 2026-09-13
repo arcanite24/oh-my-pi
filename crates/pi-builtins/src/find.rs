@@ -1792,7 +1792,7 @@ pub mod matchers {
 
 		impl Matcher for PathMatcher {
 			fn matches(&self, file_info: &WalkEntry, _: &mut MatcherIO) -> bool {
-				let path = file_info.display_path().to_string_lossy();
+				let path = file_info.display_path().to_string_lossy().replace('\\', "/");
 				self.pattern.matches(&path)
 			}
 		}
@@ -2785,14 +2785,14 @@ pub mod matchers {
 
 		impl Matcher for RegexMatcher {
 			fn matches(&self, file_info: &WalkEntry, _: &mut MatcherIO) -> bool {
-				let path = file_info.display_path().to_string_lossy();
+				let path = file_info.display_path().to_string_lossy().replace('\\', "/");
 				// `-regex` must match the WHOLE path (POSIX/GNU/BSD), not a
 				// substring: anchor the match at the start of the path and
 				// require it to end at the end of the path (backtracking
 				// retries alternatives that stop short).
 				self
 					.regex
-					.match_with_options(path.as_ref(), 0, SearchOptions::SEARCH_OPTION_WHOLE_STRING, None)
+					.match_with_options(&path, 0, SearchOptions::SEARCH_OPTION_WHOLE_STRING, None)
 					.is_some()
 			}
 		}

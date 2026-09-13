@@ -9,6 +9,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { LspServerStatus } from "../../lsp/client";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -24,6 +25,13 @@ import type { RpcMessagesPage } from "./rpc-messages";
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
+
+/** Observed connections only; never includes configuration or authentication material. */
+export interface RpcMcpStatus {
+	managerAvailable: boolean;
+	registeredTools: string[];
+	servers: { name: string; status: "connected" | "connecting" | "disconnected" }[];
+}
 
 export type RpcCommand =
 	// Protocol
@@ -41,6 +49,10 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
+	| { id?: string; type: "get_mcp_status" }
+	| { id?: string; type: "get_lsp_status" }
+	| { id?: string; type: "reload_mcp" }
+	| { id?: string; type: "set_mcp_connection"; name: string; connected: boolean }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
@@ -227,6 +239,10 @@ export type RpcResponse =
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
 	  }
+	| { id?: string; type: "response"; command: "get_mcp_status"; success: true; data: RpcMcpStatus }
+	| { id?: string; type: "response"; command: "get_lsp_status"; success: true; data: LspServerStatus[] }
+	| { id?: string; type: "response"; command: "reload_mcp"; success: true; data: { failedConnections: number } }
+	| { id?: string; type: "response"; command: "set_mcp_connection"; success: true }
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }

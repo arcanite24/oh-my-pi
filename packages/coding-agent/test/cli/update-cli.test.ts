@@ -5,6 +5,19 @@ type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
 
 describe("runUpdateCommand fetch cancellation", () => {
+	it("rejects upstream installation before fetching, including forced channel switches", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		await expect(runUpdateCommand({ force: false, check: false })).rejects.toThrow(
+			"Upstream self-update is disabled",
+		);
+		await expect(runUpdateCommand({ force: true, check: false, channel: "canary" })).rejects.toThrow(
+			"Upstream self-update is disabled",
+		);
+		await expect(runUpdateCommand({ force: true, check: false, channel: "stable" })).rejects.toThrow(
+			"Upstream self-update is disabled",
+		);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});

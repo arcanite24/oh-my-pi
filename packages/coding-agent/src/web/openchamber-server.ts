@@ -1,20 +1,25 @@
 import * as fs from "node:fs/promises";
+import { YAML } from "bun";
 import * as os from "node:os";
 import * as path from "node:path";
 import { timingSafeEqual } from "node:crypto";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { CredentialPoolExhaustedError } from "@oh-my-pi/pi-ai/auth/credential-pool";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { getAgentDbPath, getAgentDir, getModelDbPath, isRecord } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, getModelDbPath, isRecord, withFileLock } from "@oh-my-pi/pi-utils";
 import type { Provider } from "@opencode-ai/sdk/v2";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAgents } from "../task/discovery";
+import { parseAgent } from "../task/agents";
 import { loadSkills } from "../extensibility/skills";
-import { ACP_BUILTIN_SLASH_COMMANDS } from "../slash-commands/acp-builtins";
-import { OpenChamberHost } from "./openchamber-host";
+import { OpenChamberHost, parseLegacySessionGuard, type LegacySessionGuard } from "./openchamber-host";
 import { RpcCommandError } from "../modes/rpc/rpc-client";
 import { smallModelRequest } from "./openchamber-small-model";
+import { browserMcpConfig, mutateBrowserMcpConfig, readNativeMcpConfig } from "./openchamber-mcp-config";
+import { BrowserMcpOAuth } from "./openchamber-mcp-oauth";
+import type { BrowserPromptPart } from "./openchamber-messages";
 
 export interface OpenChamberServerOptions {
 	port: number;
@@ -22,6 +27,8 @@ export interface OpenChamberServerOptions {
 	command: string[];
 	dataDir?: string;
 	authDbPath?: string;
+	browserOrigin?: string;
+	legacySessionGuard?: LegacySessionGuard;
 }
 
 function field(body: Record<string, unknown>, name: string, optional = false): string | undefined {
@@ -39,6 +46,11 @@ async function requestBody(request: Request): Promise<Record<string, unknown>> {
 }
 function modelInput(body: Record<string, unknown>): { providerID: string; modelID: string } | undefined {
 	if (body.model === undefined) return undefined;
+	if (typeof body.model === "string") {
+		const separator = body.model.indexOf("/");
+		if (separator < 1 || separator === body.model.length - 1) throw new Error("Model and provider are required");
+		return { providerID: body.model.slice(0, separator), modelID: body.model.slice(separator + 1) };
+	}
 	if (!isRecord(body.model)) throw new Error("Invalid model");
 	const providerID = field(body.model, "providerID");
 	const modelID = field(body.model, "modelID");
@@ -46,14 +58,23 @@ function modelInput(body: Record<string, unknown>): { providerID: string; modelI
 	return { providerID, modelID };
 }
 
-function promptParts(body: Record<string, unknown>): { text: string; images: ImageContent[] } {
+function promptParts(body: Record<string, unknown>): {
+	text: string;
+	images: ImageContent[];
+	displayParts: BrowserPromptPart[];
+} {
 	if (!Array.isArray(body.parts)) throw new Error("Expected message parts");
 	const texts: string[] = [];
 	const images: ImageContent[] = [];
+	const displayParts: BrowserPromptPart[] = [];
 	for (const part of body.parts) {
 		if (!isRecord(part)) throw new Error("Invalid message part");
-		if (part.type === "text" && typeof part.text === "string") texts.push(part.text);
-		else if (part.type === "file" && typeof part.mime === "string" && typeof part.url === "string") {
+		if (part.type === "text" && typeof part.text === "string") {
+			if (part.synthetic !== undefined && typeof part.synthetic !== "boolean")
+				throw new Error("Invalid synthetic flag");
+			texts.push(part.text);
+			displayParts.push({ type: "text", text: part.text, synthetic: part.synthetic });
+		} else if (part.type === "file" && typeof part.mime === "string" && typeof part.url === "string") {
 			const data = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(part.url);
 			if (!data || data[1] !== part.mime)
 				throw new Error("Attachments must contain base64 data with a matching MIME type");
@@ -61,25 +82,48 @@ function promptParts(body: Record<string, unknown>): { text: string; images: Ima
 				images.push({ type: "image", mimeType: part.mime, data: data[2] });
 			else if (part.mime.startsWith("text/")) texts.push(Buffer.from(data[2], "base64").toString("utf8"));
 			else throw new Error("Upload this attachment to the project and reference its file path");
+			displayParts.push({ type: "file", mime: part.mime, url: part.url, filename: field(part, "filename", true) });
 		} else throw new Error("Unsupported message part");
 	}
-	return { text: texts.join("\n"), images };
+	return { text: texts.join("\n"), images, displayParts };
 }
 
 export async function startOpenChamberServer(options: OpenChamberServerOptions) {
+	if (options.legacySessionGuard) parseLegacySessionGuard(options.legacySessionGuard);
+	const browserOrigin = options.browserOrigin ? new URL(options.browserOrigin) : undefined;
+	if (
+		browserOrigin &&
+		(browserOrigin.username ||
+			browserOrigin.password ||
+			browserOrigin.search ||
+			browserOrigin.hash ||
+			browserOrigin.pathname !== "/" ||
+			(browserOrigin.protocol !== "https:" &&
+				!(
+					browserOrigin.protocol === "http:" &&
+					["127.0.0.1", "localhost", "[::1]"].includes(browserOrigin.hostname)
+				)))
+	)
+		throw new Error("Browser origin must be an HTTPS origin or HTTP loopback origin");
 	if (options.password.length < 32) throw new Error("OMP web backend requires a strong private password");
 	const expected = Buffer.from(`Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`);
 	const dataDir = options.dataDir ?? getAgentDir();
 	await fs.mkdir(dataDir, { recursive: true });
 	const auth = await AuthStorage.create(options.authDbPath ?? getAgentDbPath(dataDir));
 	await auth.reload();
+	const mcpOAuth = new BrowserMcpOAuth(auth);
 	const nativeSettings = await Settings.loadIsolated({ agentDir: dataDir });
 	const models = new ModelRegistry(auth, path.join(dataDir, "models.yml"), {
 		settings: nativeSettings,
 		cacheDbPath: getModelDbPath(dataDir),
 	});
 	await models.refresh("offline");
-	const host = new OpenChamberHost(options.command, path.join(dataDir, "openchamber.db"), dataDir);
+	const host = new OpenChamberHost(
+		options.command,
+		path.join(dataDir, "openchamber.db"),
+		dataDir,
+		options.legacySessionGuard,
+	);
 	const initialDirectory = process.cwd();
 	const providers = (): Provider[] => {
 		const grouped = new Map<string, Provider>();
@@ -135,6 +179,144 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 			);
 			try {
 				const route = decodeURIComponent(url.pathname);
+				if (route === "/omp/mcp-oauth" || route === "/omp/mcp-oauth/callback") {
+					try {
+						if (!browserOrigin) throw new Error("Browser origin is not configured");
+						const state = url.searchParams.get("state") ?? "";
+						const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
+						if (route.endsWith("/callback") && request.method === "GET") {
+							if (url.searchParams.has("error")) mcpOAuth.cancel(state);
+							else await mcpOAuth.complete(state, url.searchParams.get("code") ?? "");
+							return new Response(null, {
+								status: 303,
+								headers: { ...headers, Location: `${browserOrigin.origin}/?settings=mcp` },
+							});
+						}
+						if (route.endsWith("/callback")) throw new Error("Invalid callback method");
+						if (request.method === "GET" && state) return Response.json(mcpOAuth.status(state), { headers });
+						if (request.method === "DELETE") return Response.json(mcpOAuth.cancel(state), { headers });
+						if (request.method !== "POST" && request.method !== "GET")
+							throw new Error("Invalid authorization method");
+						const scope = url.searchParams.get("scope");
+						if (scope !== "user" && scope !== "project") throw new Error("Explicit MCP scope is required");
+						const config = await readNativeMcpConfig(
+							scope === "user" ? path.join(dataDir, "mcp.json") : path.join(directory, ".omp", "mcp.json"),
+						);
+						const name = url.searchParams.get("name") ?? "";
+						if (!Object.hasOwn(config.mcpServers ?? {}, name)) throw new Error("Unknown MCP server");
+						if (request.method === "GET")
+							return Response.json(mcpOAuth.statusConfigured(config.mcpServers![name]), { headers });
+						return Response.json(
+							await mcpOAuth.startConfigured(
+								config.mcpServers![name],
+								`${browserOrigin.origin}/api/omp/mcp-oauth/callback`,
+							),
+							{ headers },
+						);
+					} catch {
+						return Response.json(
+							{ error: "MCP authorization request failed" },
+							{ status: 400, headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } },
+						);
+					}
+				}
+				if (route === "/omp/mcp-config") {
+					const scope = url.searchParams.get("scope");
+					if (scope !== "user" && scope !== "project") throw new Error("Explicit MCP scope is required");
+					const file =
+						scope === "user" ? path.join(dataDir, "mcp.json") : path.join(directory, ".omp", "mcp.json");
+					if (request.method !== "GET") {
+						const body = request.method === "DELETE" ? undefined : await requestBody(request);
+						await mutateBrowserMcpConfig(file, url.searchParams.get("name") ?? "", request.method, body);
+					}
+					return Response.json({ scope, servers: await browserMcpConfig(file), appliesTo: "new-workers" });
+				}
+				if (route === "/omp/agent-definition") {
+					const name = url.searchParams.get("name") ?? "";
+					const scope = url.searchParams.get("scope");
+					if (!/^[a-zA-Z0-9_-]{1,100}$/.test(name) || (scope !== "user" && scope !== "project"))
+						throw new Error("An agent name and explicit user or project scope are required");
+					const folder = scope === "user" ? path.join(dataDir, "agents") : path.join(directory, ".omp", "agents");
+					const file = path.join(folder, `${name}.md`);
+					await fs.mkdir(folder, { recursive: true });
+					return await withFileLock(path.join(folder, ".browser-agent-edit"), async () => {
+						if (request.method === "POST") {
+							const nextName = field(await requestBody(request), "name") ?? "";
+							if (!/^[a-zA-Z0-9_-]{1,100}$/.test(nextName) || nextName.toLowerCase() === name.toLowerCase())
+								throw new Error("A distinct valid agent name is required");
+							const original = await fs.readFile(file, "utf8");
+							const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(original);
+							if (!match) throw new Error("Native agent frontmatter is required");
+							const metadata = YAML.parse(match[1]);
+							if (!isRecord(metadata)) throw new Error("Invalid native agent frontmatter");
+							metadata.name = nextName;
+							const content = `---\n${YAML.stringify(metadata).trimEnd()}\n---\n${original.slice(match[0].length)}`;
+							const destination = path.join(folder, `${nextName}.md`);
+							parseAgent(destination, content, scope);
+							const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+							try {
+								await fs.writeFile(temporary, content, { flag: "wx" });
+								// Publish complete content without replacing an existing definition.
+								await fs.link(temporary, destination);
+								await fs.unlink(file);
+							} finally {
+								await fs.rm(temporary, { force: true });
+							}
+							return Response.json({ name: nextName, scope, appliesTo: "new-workers" });
+						}
+						if (request.method === "PUT") {
+							const body = await requestBody(request);
+							const content = field(body, "content") ?? "";
+							if (content.length > 256 * 1024) throw new Error("Agent definition exceeds 256 KiB");
+							try {
+								if (parseAgent(file, content, scope).name !== name) throw new Error("Name mismatch");
+							} catch {
+								throw new Error("Invalid native agent definition or mismatched name");
+							}
+							await fs.mkdir(folder, { recursive: true });
+							const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+							try {
+								await fs.writeFile(temporary, content, { flag: "wx" });
+								if (request.headers.get("if-none-match") === "*") await fs.link(temporary, file);
+								else await fs.rename(temporary, file);
+							} finally {
+								await fs.rm(temporary, { force: true });
+							}
+							return Response.json({ name, scope, content, appliesTo: "new-workers" });
+						}
+						if (request.method === "DELETE") {
+							await fs.unlink(file);
+							return Response.json({ name, scope, deleted: true });
+						}
+						if (request.method === "GET") {
+							if (await Bun.file(file).exists())
+								return Response.json({
+									name,
+									scope,
+									content: await fs.readFile(file, "utf8"),
+									inherited: false,
+								});
+							if (url.searchParams.get("inherit") === "true") {
+								const definition = (await discoverAgents(directory)).agents.find(agent => agent.name === name);
+								if (definition) {
+									const { systemPrompt, source, filePath: _filePath, ...frontmatter } = definition;
+									const content = `---\n${YAML.stringify(frontmatter).trimEnd()}\n---\n\n${systemPrompt}\n`;
+									return Response.json({ name, scope, content, inherited: true, source });
+								}
+								if (name === "build")
+									return Response.json({
+										name,
+										scope,
+										inherited: true,
+										source: "bundled",
+										content: '---\nname: build\ndescription: OMP coding agent\nspawns: "*"\n---\n',
+									});
+							}
+							return Response.json({ error: "Agent definition not found" }, { status: 404 });
+						}
+						return new Response(null, { status: 405 });
+					});
+				}
 				if (route === "/omp/small-model" && request.method === "POST")
 					return await smallModelRequest(await requestBody(request), models, nativeSettings, request.signal);
 				if (route === "/config" || route === "/global/config") {
@@ -147,36 +329,47 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 						if (body.small_model !== undefined) nativeSettings.setModelRole("smol", field(body, "small_model"));
 						await nativeSettings.flush();
 					}
-					return Response.json({
-						model: nativeSettings.getModelRole("default"),
-						small_model: nativeSettings.getModelRole("smol"),
-						autoupdate: false,
-					});
+					return Response.json(
+						{
+							model: nativeSettings.getModelRole("default"),
+							small_model: nativeSettings.getModelRole("smol"),
+							autoupdate: false,
+						},
+						{ headers: { "X-OMP-MCP-Scope": "session" } },
+					);
 				}
 				if (route === "/agent") {
 					const { agents } = await discoverAgents(directory);
 					return Response.json([
-						{
-							name: "build",
-							description: "OMP coding agent",
-							mode: "primary",
-							native: true,
-							options: {},
-							permission: [],
-						},
+						...(!agents.some(agent => agent.name === "build")
+							? [
+									{
+										name: "build",
+										description: "OMP coding agent",
+										mode: "primary",
+										native: true,
+										options: { runtime: "omp" },
+										permission: [],
+									},
+								]
+							: []),
 						...agents.map(agent => ({
 							name: agent.name,
 							description: agent.description,
-							mode: "subagent",
+							mode: "all",
 							native: agent.source === "bundled",
-							options: {},
+							options: {
+								runtime: "omp",
+								scope: agent.source === "project" ? "project" : "user",
+								source: agent.source,
+							},
 							permission: [],
 						})),
 					]);
 				}
 				if (route === "/command")
 					return Response.json(
-						ACP_BUILTIN_SLASH_COMMANDS.map(command => ({
+						(await host.commands(directory)).map(command => ({
 							name: command.name,
 							description: command.description,
 							template: `/${command.name} $ARGUMENTS`,
@@ -297,6 +490,35 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 						directory,
 					});
 				if (route === "/session/status") return Response.json(host.status());
+				if (route === "/vcs" && request.method === "GET") {
+					const repository = vcs.git(directory);
+					return Response.json(
+						repository
+							? {
+									branch: (await repository.currentBranch(request.signal)) ?? undefined,
+									default_branch: (await repository.defaultBranch(request.signal)) ?? undefined,
+								}
+							: {},
+					);
+				}
+				// OMP confirmations share the question queue; there is no separate permission queue.
+				if (route === "/permission" && request.method === "GET") return Response.json([]);
+				if (route === "/lsp" && request.method === "GET") {
+					const servers = await host.lspStatus(directory);
+					if (servers.some(server => server.status === "connecting"))
+						return Response.json(
+							{ name: "LspStarting", data: { message: "Language servers are starting" } },
+							{ status: 503 },
+						);
+					return Response.json(
+						servers.map(server => ({
+							id: server.id,
+							name: server.name,
+							root: server.root,
+							status: server.status === "ready" ? "connected" : "error",
+						})),
+					);
+				}
 				if (route === "/question") return Response.json(host.questions());
 				const question = /^\/question\/([^/]+)\/(reply|reject)$/.exec(route);
 				if (question && request.method === "POST") {
@@ -323,6 +545,22 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 				const sessionRoute = /^\/session\/([^/]+)(?:\/(.*))?$/.exec(route);
 				if (sessionRoute) {
 					const [, id, action] = sessionRoute;
+					if (action === "lsp" && request.method === "GET")
+						return Response.json(await (await host.client(id)).getLspStatus());
+					if (action === "mcp" && request.method === "GET")
+						return Response.json(await (await host.client(id)).getMcpStatus());
+					if (action === "mcp" && request.method === "POST") {
+						const body = await requestBody(request);
+						if (body.reload === true) {
+							const client = await host.client(id);
+							const result = await client.reloadMcp();
+							return Response.json({ ...(await client.getMcpStatus()), ...result });
+						}
+						if (typeof body.connected !== "boolean") throw new Error("Expected connected boolean");
+						const client = await host.client(id);
+						await client.setMcpConnection(field(body, "name") ?? "", body.connected);
+						return Response.json(await client.getMcpStatus());
+					}
 					if (!action) {
 						if (request.method === "DELETE") {
 							await host.remove(id);
@@ -354,12 +592,31 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 							? Response.json(message)
 							: Response.json({ error: "Message not found" }, { status: 404 });
 					}
-					if ((action === "prompt_async" || action === "message") && request.method === "POST") {
+					if (
+						(action === "prompt_async" || action === "message" || action === "command") &&
+						request.method === "POST"
+					) {
 						const body = await requestBody(request);
-						const { text, images } = promptParts(body);
+						if (action === "command") {
+							if (body.parts !== undefined && !Array.isArray(body.parts))
+								throw new Error("Expected message parts");
+							body.parts = [
+								{ type: "text", text: `/${field(body, "command")} ${field(body, "arguments", true) ?? ""}` },
+								...(Array.isArray(body.parts) ? body.parts : []),
+							];
+						}
+						const { text, images, displayParts } = promptParts(body);
 						const messageID = field(body, "messageID", true) ?? `msg_${crypto.randomUUID()}`;
-						await host.prompt(id, text, modelInput(body), messageID, images);
-						if (action === "message") {
+						await host.prompt(
+							id,
+							text,
+							modelInput(body),
+							messageID,
+							images,
+							field(body, "agent", true),
+							displayParts,
+						);
+						if (action !== "prompt_async") {
 							await host.waitForIdle(id, AbortSignal.any([request.signal, AbortSignal.timeout(30 * 60_000)]));
 							const message = (await host.messages(id)).findLast(
 								message => message.info.role === "assistant" && message.info.parentID === messageID,
@@ -394,15 +651,6 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 					if (action === "summarize" && request.method === "POST") {
 						await (await host.client(id)).compact();
 						return Response.json(true);
-					}
-					if (action === "command" && request.method === "POST") {
-						const body = await requestBody(request);
-						await host.prompt(
-							id,
-							`/${field(body, "command")} ${field(body, "arguments", true) ?? ""}`,
-							modelInput(body),
-						);
-						return new Response(null, { status: 204 });
 					}
 					if (action === "shell" && request.method === "POST") {
 						const body = await requestBody(request);
@@ -461,6 +709,7 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 		host,
 		async close() {
 			server.stop(true);
+			mcpOAuth.close();
 			await host.close();
 			auth.close();
 		},

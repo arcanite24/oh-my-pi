@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve Linux desktop notification socket paths consistently when checking an explicitly selected platform.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

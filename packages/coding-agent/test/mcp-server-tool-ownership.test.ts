@@ -36,7 +36,24 @@ const SHORT_TOOL = `mcp__atlassian_${manyToolName(0)}`;
 const COLON_TOOL = `mcp__atlassian_atlassian_${manyToolName(0)}`;
 
 function fixtureConfig(): MCPStdioServerConfig {
-	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
+	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH, "--delay", "300"] };
+}
+
+async function connectFixtures(manager: MCPManager): Promise<void> {
+	const ready = Promise.withResolvers<void>();
+	const connected = new Set<string>();
+	const loaded = await manager.connectServers(
+		{ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() },
+		{},
+		event => {
+			if (event.type !== "connected") return;
+			connected.add(event.serverName);
+			if (connected.size === 2) ready.resolve();
+		},
+	);
+	expect([...loaded.errors]).toEqual([]);
+	// Startup intentionally returns before slow servers finish discovering tools.
+	await ready.promise;
 }
 
 describe("MCP tool ownership with prefix-colliding server names", () => {
@@ -54,7 +71,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	});
 
 	it("refreshing one server keeps the sibling server's tools registered", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectFixtures(manager);
 		const names = () => manager.getTools().map(t => t.name);
 		expect(names()).toContain(SHORT_TOOL);
 		expect(names()).toContain(COLON_TOOL);
@@ -80,7 +97,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	}, 20_000);
 
 	it("disconnecting a server with sanitized name characters removes exactly its tools", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectFixtures(manager);
 		const payloads: string[][] = [];
 		manager.setOnToolsChanged(tools => {
 			payloads.push(tools.map(t => t.name));

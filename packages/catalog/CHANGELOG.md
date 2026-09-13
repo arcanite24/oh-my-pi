@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Close failed model-cache initialization handles so corrupt SQLite files can be quarantined and recreated on Windows.
+
 ### Added
+
+- Embedders can release the shared model-cache connection before removing or replacing its database.
 
 - Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 

@@ -11,6 +11,7 @@ import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 // against a dead terminal is best-effort; the exit must still happen.
 
 /** The error Bun's node:tty shim raises for an ioctl on a revoked pty. */
+const originalPlatform = process.platform;
 const REVOKED_PTY = "setRawMode failed with errno: 2";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -30,6 +31,7 @@ describe("ProcessTerminal disconnect with a revoked pty", () => {
 	let signals: string[];
 
 	beforeEach(() => {
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 		signals = [];
 		previousHeadless = setTerminalHeadless(false);
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
@@ -46,6 +48,7 @@ describe("ProcessTerminal disconnect with a revoked pty", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);

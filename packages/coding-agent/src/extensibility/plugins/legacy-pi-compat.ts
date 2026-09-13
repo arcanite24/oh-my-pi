@@ -906,6 +906,9 @@ const nativeAddonResolutionCache = new Map<string, Promise<string | null>>();
 const nativeAddonRequireScanCache = new Map<string, Promise<boolean>>();
 
 function clearLegacyPiResolutionCaches(): void {
+	extensionParseCacheDb?.close();
+	extensionParseCacheDb = undefined;
+	extensionSourceAnalysisCache.clear();
 	resolvedSpecifierFallbacks.clear();
 	packageRootCache.clear();
 	packageImportsCache.clear();
