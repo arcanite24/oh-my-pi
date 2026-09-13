@@ -8,6 +8,7 @@
 - Fixed provider streams that die after emitting `toolcall_start` but before any argument content failing validation with empty `{}` arguments; the uncommitted attempt is now discarded and retried ([#11823](https://github.com/can1357/oh-my-pi/pull/11823) by [@justdoGIT](https://github.com/justdoGIT)).
 ### Added
 
+- OpenCode Go credential pools support most-headroom, sticky, and round-robin selection, persistent account controls and cooldowns, usage thresholds, and explicit monthly paid fallback. Missing or stale usage pauses selection.
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 
 ### Fixed

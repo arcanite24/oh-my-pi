@@ -8,6 +8,17 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import {
+	choosePoolCredential,
+	CredentialPoolExhaustedError,
+	evaluatePool,
+	type CredentialPoolCandidate,
+	type CredentialPoolSettings,
+	type CredentialPoolStatus,
+	type CredentialPoolStore,
+	parsePoolAccount,
+	parsePoolSettings,
+} from "./auth/credential-pool";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -382,7 +393,7 @@ export interface CredentialRefreshLeaseFence {
 	nowMs: number;
 }
 
-export interface AuthCredentialStore {
+export interface AuthCredentialStore extends Partial<CredentialPoolStore> {
 	close(): void;
 	/**
 	 * Stateful probe for commits made by another process to the backing store.
@@ -5938,6 +5949,126 @@ export class AuthStorage {
 	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
 	 * 7. Fallback resolver (models.yml custom providers, last-resort)
 	 */
+	#poolStore(): AuthCredentialStore & CredentialPoolStore {
+		const store = this.#store;
+		if (
+			!store.getPoolSettings ||
+			!store.setPoolSettings ||
+			!store.getPoolAccount ||
+			!store.setPoolAccount ||
+			!store.poolTransaction
+		) {
+			throw new Error("Credential pool requires a local SQLite credential store");
+		}
+		return store as AuthCredentialStore & CredentialPoolStore;
+	}
+
+	setCredentialPoolSettings(provider: string, input: unknown): void {
+		const windows = this.#rankingStrategyResolver?.(provider)?.poolWindowIds;
+		if (!windows) throw new Error("Provider does not support credential pools");
+		const settings = parsePoolSettings(input);
+		if (Object.keys(settings.thresholds).some(key => !windows.includes(key))) throw new Error("Unknown quota window");
+		this.#poolStore().setPoolSettings(provider, settings);
+	}
+
+	setCredentialPoolAccount(provider: string, credentialId: number, input: unknown): void {
+		const store = this.#poolStore();
+		store.poolTransaction(() => {
+			if (!store.listAuthCredentials(provider).some(row => row.id === credentialId))
+				throw new Error("Unknown credential");
+			const account = parsePoolAccount(input);
+			account.lastSelected = store.getPoolAccount(credentialId).lastSelected;
+			store.setPoolAccount(credentialId, account);
+		});
+	}
+
+	async #poolUsage(provider: string, options?: AuthApiKeyOptions): Promise<Map<number, UsageReport | null>> {
+		await this.reload();
+		const entries = this.#getStoredCredentials(provider).filter(entry => entry.credential.type === "api_key");
+		return new Map(
+			await Promise.all(
+				entries.map(async entry => {
+					try {
+						return [entry.id, await this.#getUsageReport(provider, entry.credential, options)] as const;
+					} catch {
+						// An invalid account or a failed probe must not hide healthy siblings.
+						return [entry.id, null] as const;
+					}
+				}),
+			),
+		);
+	}
+
+	#poolCandidates(provider: string, reports: Map<number, UsageReport | null>): CredentialPoolCandidate[] {
+		const store = this.#poolStore();
+		this.#setStoredCredentials(provider, store.listAuthCredentials(provider));
+		return this.#getStoredCredentials(provider).flatMap((entry, index) =>
+			entry.credential.type !== "api_key"
+				? []
+				: [
+						{
+							id: entry.id,
+							account: store.getPoolAccount(entry.id),
+							usage: reports.get(entry.id) ?? null,
+							blockedUntil: this.#getCredentialBlockedUntil(
+								provider,
+								this.#getProviderTypeKey(provider, "api_key"),
+								index,
+							),
+						},
+					],
+		);
+	}
+
+	async getCredentialPool(
+		provider: string,
+		options?: AuthApiKeyOptions,
+	): Promise<{ settings: CredentialPoolSettings; accounts: CredentialPoolStatus[] }> {
+		const windows = this.#rankingStrategyResolver?.(provider)?.poolWindowIds;
+		if (!windows) throw new Error("Provider does not support credential pools");
+		const reports = await this.#poolUsage(provider, options);
+		const store = this.#poolStore();
+		return store.poolTransaction(() => {
+			const settings = store.getPoolSettings(provider);
+			return { settings, accounts: evaluatePool(this.#poolCandidates(provider, reports), settings, windows) };
+		});
+	}
+
+	async #selectPoolKey(
+		provider: string,
+		sessionId: string | undefined,
+		windows: readonly string[],
+		options?: AuthApiKeyOptions,
+	): Promise<string> {
+		const reports = await this.#poolUsage(provider, options);
+		options?.signal?.throwIfAborted();
+		const store = this.#poolStore();
+		const selected = store.poolTransaction(() => {
+			const candidates = this.#poolCandidates(provider, reports);
+			const settings = store.getPoolSettings(provider);
+			const statuses = evaluatePool(candidates, settings, windows);
+			const sticky = this.#getSessionCredential(provider, sessionId);
+			const stickyId = sticky ? this.#getStoredCredentials(provider)[sticky.index]?.id : undefined;
+			const choice = choosePoolCredential(statuses, settings.policy, stickyId);
+			if (!choice) throw new CredentialPoolExhaustedError(statuses);
+			const entries = this.#getStoredCredentials(provider);
+			const index = entries.findIndex(entry => entry.id === choice.id);
+			const credential = entries[index]?.credential;
+			if (credential?.type !== "api_key") throw new Error("Credential changed during pool selection");
+			const account = store.getPoolAccount(choice.id);
+			account.lastSelected = Math.max(
+				Date.now(),
+				...candidates.map(candidate => candidate.account.lastSelected + 1),
+			);
+			store.setPoolAccount(choice.id, account);
+			this.#recordSessionCredential(provider, sessionId, "api_key", index);
+			return credential.key;
+		});
+		const key = await this.#configValueResolver(selected);
+		if (!key) throw new Error("Selected credential could not be resolved");
+		return key;
+	}
+
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.#runtimeOverrides.get(provider);
@@ -5953,6 +6084,12 @@ export class AuthStorage {
 		const configKey = this.#configOverrides.get(provider);
 		if (configKey) {
 			return configKey;
+		}
+
+		const poolWindows = this.#rankingStrategyResolver?.(provider)?.poolWindowIds;
+		if (poolWindows) this.#setStoredCredentials(provider, this.#store.listAuthCredentials(provider));
+		if (poolWindows && this.#getStoredCredentials(provider).some(entry => entry.credential.type === "api_key")) {
+			return this.#selectPoolKey(provider, sessionId, poolWindows, options);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,

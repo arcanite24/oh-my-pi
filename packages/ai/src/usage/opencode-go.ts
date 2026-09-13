@@ -195,6 +195,7 @@ export const opencodeGoUsageProvider: UsageProvider = {
  * usage-limit classification ([#3169](https://github.com/can1357/oh-my-pi/issues/3169)).
  */
 export const opencodeGoRankingStrategy: CredentialRankingStrategy = {
+	poolWindowIds: ["rolling-5h", "weekly", "monthly"],
 	findWindowLimits: report => ({
 		primary: report.limits.find(limit => limit.id === "rolling-5h"),
 		secondary: report.limits.find(limit => limit.id === "weekly"),

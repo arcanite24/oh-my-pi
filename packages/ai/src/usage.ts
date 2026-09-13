@@ -371,6 +371,8 @@ export interface CredentialRankingContext {
 
 /** Strategy for usage-based credential ranking. Providers implement this to opt into smart credential selection. */
 export interface CredentialRankingStrategy {
+	/** Opt into persistent pool policies; ordered short, long, paid-fallback window. */
+	poolWindowIds?: readonly [string, string, string];
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */
 	findWindowLimits(
 		report: UsageReport,

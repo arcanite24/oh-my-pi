@@ -26,6 +26,12 @@ import type {
 	StoredCredentialBlock,
 } from "../auth-storage";
 import * as AIError from "../error";
+import {
+	type CredentialPoolSettings,
+	type CredentialPoolAccount,
+	parsePoolSettings,
+	parsePoolAccount,
+} from "./credential-pool";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type {
@@ -604,6 +610,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				expires_at INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
+			CREATE TABLE IF NOT EXISTS credential_pool_settings (
+				provider TEXT PRIMARY KEY,
+				settings TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS credential_pool_accounts (
+				credential_id INTEGER PRIMARY KEY,
+				settings TEXT NOT NULL
+			);
 			CREATE TABLE IF NOT EXISTS usage_history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
@@ -1498,6 +1512,40 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		} catch {
 			// Ignore delete failures
 		}
+	}
+
+	getPoolSettings(provider: string): CredentialPoolSettings {
+		const row = this.#db
+			.query<{ settings: string }, [string]>("SELECT settings FROM credential_pool_settings WHERE provider = ?")
+			.get(provider);
+		return parsePoolSettings(row ? JSON.parse(row.settings) : {});
+	}
+
+	setPoolSettings(provider: string, settings: CredentialPoolSettings): void {
+		this.#db.run(
+			"INSERT INTO credential_pool_settings VALUES (?, ?) ON CONFLICT(provider) DO UPDATE SET settings = excluded.settings",
+			[provider, JSON.stringify(parsePoolSettings(settings))],
+		);
+	}
+
+	getPoolAccount(credentialId: number): CredentialPoolAccount {
+		const row = this.#db
+			.query<{ settings: string }, [number]>("SELECT settings FROM credential_pool_accounts WHERE credential_id = ?")
+			.get(credentialId);
+		return parsePoolAccount(row ? JSON.parse(row.settings) : {});
+	}
+
+	setPoolAccount(credentialId: number, account: CredentialPoolAccount): void {
+		if (!this.#db.query("SELECT id FROM auth_credentials WHERE id = ?").get(credentialId))
+			throw new Error("Unknown credential");
+		this.#db.run(
+			"INSERT INTO credential_pool_accounts VALUES (?, ?) ON CONFLICT(credential_id) DO UPDATE SET settings = excluded.settings",
+			[credentialId, JSON.stringify(parsePoolAccount(account))],
+		);
+	}
+
+	poolTransaction<T>(operation: () => T): T {
+		return this.#db.transaction(operation).immediate();
 	}
 
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null {

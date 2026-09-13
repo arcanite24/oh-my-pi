@@ -229,6 +229,22 @@ describe("AuthStorage api-key login upsert", () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		getEnvApiKeySpy.mockImplementation(provider => (provider === "opencode-go" ? "old-opencode-key" : undefined));
+		authStorage.setRuntimeUsageProvider("opencode-go", {
+			id: "opencode-go",
+			supports: () => true,
+			fetchUsage: async () => ({
+				provider: "opencode-go",
+				fetchedAt: Date.now(),
+				limits: ["rolling-5h", "weekly", "monthly"].map(id => ({
+					id,
+					label: id,
+					scope: { provider: "opencode-go" },
+					amount: { usedFraction: 0, unit: "percent" },
+					window: { id, label: id, resetsAt: Date.now() + 3600_000 },
+					status: "ok",
+				})),
+			}),
+		});
 
 		await authStorage.login("opencode-go", {
 			onAuth: () => {},
