@@ -7,7 +7,7 @@ Browser baseline: `openchamber/openchamber@961f1611cb50cb7dd8d24c82e688ca6d8eef3
 
 The fork is live. The installed CLI and protected Windows service binary are
 `omp/18.1.18`, SHA-256
-`950DD4B27A65BA839083E3C90A65C9CFEF5D927A609168B1ECE971E482968A33`.
+`F846C71900C8498D71C12FC06BA477CD2A515081B5B1331093C197738AF34D75`.
 `Multivac OMP Runtime` serves the versioned RPC adapter on loopback port 4417;
 `Multivac OMP Browser` serves the authenticated OpenChamber application on
 4418 and hosted preview gate on 4419. Public access is
@@ -25,7 +25,7 @@ over before this status was recorded.
 The final cutover backup is
 `C:\Users\neri\arrstack\appdata\secrets\omp-backups\2026-09-13-171745-cutover`.
 The active executable rollback manifest is
-`C:\Users\neri\AppData\Local\omp\omp-cutover-7b7a7904bac948dbbf6745dc3a3af6ee.json`.
+`C:\Users\neri\AppData\Local\omp\omp-cutover-3f5ad63f650040ddac20f4474596760c.json`.
 Infrastructure and rollback procedure are authoritative in
 `C:\Users\neri\arrstack\DOMAIN.md`.
 

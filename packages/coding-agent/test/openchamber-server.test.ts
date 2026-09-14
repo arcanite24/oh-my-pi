@@ -146,6 +146,30 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 		expect(saved.status).toBe(200);
 		const read = await request("/omp/pool", { headers: { authorization } });
 		expect(await read.json()).toMatchObject({ settings: { policy: "round-robin", thresholds: { weekly: 95 } } });
+		const added = await request("/omp/pool/accounts", {
+			method: "POST",
+			headers: { authorization },
+			body: JSON.stringify({ key: "test-open-code-go-key" }),
+		});
+		expect(added.status).toBe(200);
+		const addedPool = (await added.json()) as { accounts: Array<{ id: number }> };
+		const credentialId = addedPool.accounts[0]?.id;
+		expect(credentialId).toBeNumber();
+		expect(
+			(
+				await request(`/omp/pool/accounts/${credentialId}`, {
+					method: "DELETE",
+					headers: { authorization },
+				})
+			).status,
+		).toBe(200);
+		const emptyPool = (await (await request("/omp/pool", { headers: { authorization } })).json()) as {
+			accounts: unknown[];
+		};
+		expect(emptyPool.accounts).toHaveLength(0);
+		expect(
+			(await request(`/omp/pool/accounts/${credentialId}`, { method: "DELETE", headers: { authorization } })).status,
+		).toBe(404);
 		expect((await fs.stat(path.join(directory, "agent.db"))).isFile()).toBe(true);
 		const mcpRoute = "/omp/mcp-config?scope=user&name=config-probe";
 		const createdMcp = await request(mcpRoute, {

@@ -466,13 +466,19 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 					}
 				}
 				const accountRoute = /^\/omp\/pool\/accounts\/(\d+)$/.exec(route);
-				if (accountRoute && request.method === "PUT") {
-					auth.setCredentialPoolAccount(
-						url.searchParams.get("provider") ?? "opencode-go",
-						Number(accountRoute[1]),
-						await requestBody(request),
-					);
-					return Response.json(true);
+				if (accountRoute) {
+					const provider = url.searchParams.get("provider") ?? "opencode-go";
+					const credentialId = Number(accountRoute[1]);
+					if (request.method === "PUT") {
+						auth.setCredentialPoolAccount(provider, credentialId, await requestBody(request));
+						return Response.json(true);
+					}
+					if (request.method === "DELETE") {
+						if (!(await auth.removeCredential(provider, credentialId))) {
+							return Response.json({ error: "Credential account not found" }, { status: 404 });
+						}
+						return Response.json(await auth.getCredentialPool(provider));
+					}
 				}
 				if (route === "/omp/pool/accounts" && request.method === "POST") {
 					const body = await requestBody(request);
