@@ -155,6 +155,27 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 		const addedPool = (await added.json()) as { accounts: Array<{ id: number }> };
 		const credentialId = addedPool.accounts[0]?.id;
 		expect(credentialId).toBeNumber();
+		const duplicate = await request("/omp/pool/accounts", {
+			method: "POST",
+			headers: { authorization },
+			body: JSON.stringify({ key: "test-open-code-go-key" }),
+		});
+		expect(duplicate.status).toBe(409);
+		expect(await duplicate.json()).toMatchObject({ code: "duplicate_credential" });
+		const second = await request("/omp/pool/accounts", {
+			method: "POST",
+			headers: { authorization },
+			body: JSON.stringify({ key: "different-open-code-go-key" }),
+		});
+		expect(second.status).toBe(200);
+		expect(((await second.json()) as { accounts: unknown[] }).accounts).toHaveLength(2);
+		const secondId = ((await (await request("/omp/pool", { headers: { authorization } })).json()) as {
+			accounts: Array<{ id: number }>;
+		}).accounts.find(account => account.id !== credentialId)?.id;
+		expect(secondId).toBeNumber();
+		expect(
+			(await request(`/omp/pool/accounts/${secondId}`, { method: "DELETE", headers: { authorization } })).status,
+		).toBe(200);
 		expect(
 			(
 				await request(`/omp/pool/accounts/${credentialId}`, {

@@ -484,8 +484,16 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 					const body = await requestBody(request);
 					const key = field(body, "key");
 					if (!key?.trim()) throw new Error("API key required");
+					const before = await auth.getCredentialPool("opencode-go");
 					auth.upsertCredential("opencode-go", { type: "api_key", key, source: "login" });
-					return Response.json(await auth.getCredentialPool("opencode-go"));
+					const after = await auth.getCredentialPool("opencode-go");
+					if (after.accounts.length === before.accounts.length) {
+						return Response.json(
+							{ error: "This API key is already in the credential pool", code: "duplicate_credential" },
+							{ status: 409 },
+						);
+					}
+					return Response.json(after);
 				}
 				if (route === "/path")
 					return Response.json({
