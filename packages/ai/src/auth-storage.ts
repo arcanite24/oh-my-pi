@@ -4101,7 +4101,7 @@ export class AuthStorage {
 	async #getUsageReport(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; forceRefresh?: boolean },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -4130,6 +4130,7 @@ export class AuthStorage {
 		}
 		return this.#fetchUsageCached(this.#buildUsageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+			forceRefresh: options?.forceRefresh,
 		});
 	}
 
@@ -6002,11 +6003,20 @@ export class AuthStorage {
 	async #poolUsage(provider: string, options?: AuthApiKeyOptions): Promise<Map<number, UsageReport | null>> {
 		await this.reload();
 		const entries = this.#getStoredCredentials(provider).filter(entry => entry.credential.type === "api_key");
+		const maxUsageAgeMs = this.#poolStore().getPoolSettings(provider).maxUsageAgeMs;
 		return new Map(
 			await Promise.all(
 				entries.map(async entry => {
 					try {
-						return [entry.id, await this.#getUsageReport(provider, entry.credential, options)] as const;
+						let report = await this.#getUsageReport(provider, entry.credential, options);
+						const age = report ? Date.now() - report.fetchedAt : 0;
+						if (report && (age < 0 || age > maxUsageAgeMs)) {
+							report = await this.#getUsageReport(provider, entry.credential, {
+								...options,
+								forceRefresh: true,
+							});
+						}
+						return [entry.id, report] as const;
 					} catch {
 						// An invalid account or a failed probe must not hide healthy siblings.
 						return [entry.id, null] as const;

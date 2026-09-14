@@ -73,6 +73,23 @@ test("unknown and stale usage cannot authorize requests", async () => {
 	const { auth } = await setup({ a: null, b: report(0, 0, 0, now - 600_000) });
 	await expect(auth.getApiKey(provider)).rejects.toThrow("usage unavailable or stale");
 });
+test("pool refreshes a cached report when the cache outlives its eligibility age", async () => {
+	const stale = report(90, 90, 90, now - 600_000);
+	const fresh = report(10, 10, 10);
+	let fetches = 0;
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pool-refresh-"));
+	const store = await SqliteAuthCredentialStore.open(path.join(directory, "agent.db"));
+	const usage: UsageProvider = {
+		id: provider,
+		supports: () => true,
+		fetchUsage: async () => (++fetches === 1 ? stale : fresh),
+	};
+	const refreshing = new AuthStorage(store, { usageProviderResolver: () => usage });
+	await refreshing.set(provider, [{ type: "api_key", key: "a", source: "login" }]);
+	resources.push({ auth: refreshing, directory });
+	expect(await refreshing.getApiKey(provider)).toBe("a");
+	expect(fetches).toBe(2);
+});
 test("monthly fallback is opt-in and subscription capacity wins", async () => {
 	const { auth, store } = await setup({ a: report(0, 0, 100), b: report(70, 70) });
 	const a = store.listAuthCredentials(provider)[0];

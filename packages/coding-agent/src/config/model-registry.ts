@@ -219,6 +219,7 @@ export type ResolvedRequestAuth =
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
+	#modelLock?: { provider: string; id: string };
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
 	#hasFullSnapshot = false;
@@ -372,8 +373,17 @@ export class ModelRegistry {
 			/** Model discovery cache database. Defaults beside an explicit models config. */
 			cacheDbPath?: string;
 			fetch?: FetchImpl;
+			/** Restrict this process to one exact provider/model (used by embedded runtimes). */
+			modelLock?: string;
 		},
 	) {
+		const modelLock = options?.modelLock ?? Bun.env.OMP_MODEL_LOCK;
+		if (modelLock) {
+			const separator = modelLock.indexOf("/");
+			if (separator < 1 || separator === modelLock.length - 1 || modelLock.indexOf("/", separator + 1) !== -1)
+				throw new Error("OMP_MODEL_LOCK must be an exact provider/model selector");
+			this.#modelLock = { provider: modelLock.slice(0, separator), id: modelLock.slice(separator + 1) };
+		}
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
 		this.#settings = options?.settings;
 		this.#fetch =
@@ -2246,7 +2256,13 @@ export class ModelRegistry {
 	 * If custom config had errors, returns only built-in models.
 	 */
 	getAll(): Model<Api>[] {
-		return this.#ensureFullSnapshot();
+		return this.#filterModelLock(this.#ensureFullSnapshot());
+	}
+
+	#filterModelLock(models: Model<Api>[]): Model<Api>[] {
+		return this.#modelLock
+			? models.filter(model => model.provider === this.#modelLock?.provider && model.id === this.#modelLock.id)
+			: models;
 	}
 
 	/**
@@ -2279,8 +2295,10 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model => requested.has(model.provider.toLowerCase()) && isProviderAvailable(model.provider),
+			return this.#filterModelLock(
+				this.#models.filter(
+					model => requested.has(model.provider.toLowerCase()) && isProviderAvailable(model.provider),
+				),
 			);
 		}
 		const availableProviders = new Set(
@@ -2288,7 +2306,7 @@ export class ModelRegistry {
 				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
 			),
 		);
-		return this.#composeStaticModels(availableProviders);
+		return this.#filterModelLock(this.#composeStaticModels(availableProviders));
 	}
 
 	/**
@@ -2362,6 +2380,7 @@ export class ModelRegistry {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		return this.#discoverableProviders
 			.filter(provider => !disabledProviders.has(provider.provider))
+			.filter(provider => !this.#modelLock || provider.provider === this.#modelLock.provider)
 			.map(provider => provider.provider);
 	}
 
@@ -2403,6 +2422,8 @@ export class ModelRegistry {
 	 * Find a model by provider and ID.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
+		if (this.#modelLock && (provider !== this.#modelLock.provider || modelId !== this.#modelLock.id))
+			return undefined;
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
 	}
 

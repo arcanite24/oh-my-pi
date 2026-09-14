@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { startOpenChamberServer } from "../src/web/openchamber-server";
 import { AgentStorage } from "../src/session/agent-storage";
 import { SessionManager } from "../src/session/session-manager";
@@ -99,6 +100,62 @@ test("browser messages preserve cancellation and truncation without exposing pro
 	]);
 	expect(JSON.stringify(failed)).not.toContain("secret-test-key");
 	expect(failed[0].info).toMatchObject({ error: { name: "UnknownError" } });
+	const exhausted = browserMessages(session, [
+		{
+			...createAssistantMessage(""),
+			stopReason: "error",
+			errorMessage:
+				"Credential pool unavailable: provider cooldown; window limit: rolling-5h. Earliest reset: 2026-09-14T03:37:10.376Z.",
+		},
+	]);
+	expect(exhausted[0].info).toMatchObject({
+		error: {
+			data: {
+				message: "Credential pool unavailable (rolling-5h). Earliest reset: 2026-09-14T03:37:10.376Z.",
+			},
+		},
+	});
+});
+
+test("browser backend tracks OpenCode Go usage without a connected browser", async () => {
+	vi.useFakeTimers();
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-usage-"));
+	const getPool = spyOn(AuthStorage.prototype, "getCredentialPool").mockResolvedValue({
+		settings: { policy: "most-headroom", thresholds: {}, maxUsageAgeMs: 300_000 },
+		accounts: [],
+	});
+	const invalidateUsage = spyOn(AuthStorage.prototype, "invalidateUsageCache").mockResolvedValue();
+	const password = crypto.randomUUID();
+	const runtime = await startOpenChamberServer({
+		port: 0,
+		password,
+		dataDir: directory,
+		command: [process.execPath],
+	});
+	try {
+		await Promise.resolve();
+		expect(getPool).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(60_000);
+		await Promise.resolve();
+		expect(getPool).toHaveBeenCalledTimes(2);
+		const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
+		expect((await fetch(`${runtime.server.url}omp/pool?refresh=true`, { headers: { authorization } })).status).toBe(
+			200,
+		);
+		expect(invalidateUsage).toHaveBeenCalledTimes(1);
+		expect(getPool).toHaveBeenCalledTimes(3);
+		await runtime.close();
+		vi.advanceTimersByTime(60_000);
+		await Promise.resolve();
+		expect(getPool).toHaveBeenCalledTimes(3);
+	} finally {
+		await runtime.close();
+		invalidateUsage.mockRestore();
+		getPool.mockRestore();
+		vi.useRealTimers();
+		AgentStorage.close();
+		await removeWithRetries(directory);
+	}
 });
 
 test("private browser adapter rejects bypasses and stores pool settings in isolated state", async () => {
@@ -169,9 +226,11 @@ test("private browser adapter rejects bypasses and stores pool settings in isola
 		});
 		expect(second.status).toBe(200);
 		expect(((await second.json()) as { accounts: unknown[] }).accounts).toHaveLength(2);
-		const secondId = ((await (await request("/omp/pool", { headers: { authorization } })).json()) as {
-			accounts: Array<{ id: number }>;
-		}).accounts.find(account => account.id !== credentialId)?.id;
+		const secondId = (
+			(await (await request("/omp/pool", { headers: { authorization } })).json()) as {
+				accounts: Array<{ id: number }>;
+			}
+		).accounts.find(account => account.id !== credentialId)?.id;
 		expect(secondId).toBeNumber();
 		expect(
 			(await request(`/omp/pool/accounts/${secondId}`, { method: "DELETE", headers: { authorization } })).status,

@@ -64,6 +64,7 @@ export class OpenChamberHost {
 		dbPath = path.join(getAgentDir(), "openchamber.db"),
 		readonly agentDir = getAgentDir(),
 		readonly legacyGuard?: LegacySessionGuard,
+		readonly modelLock?: string,
 	) {
 		if (legacyGuard) parseLegacySessionGuard(legacyGuard);
 		this.#db = new Database(dbPath, { create: true });
@@ -323,8 +324,9 @@ export class OpenChamberHost {
 			command: this.command,
 			ui: true,
 			cwd: directory,
-			args: ["--no-session"],
-			env: { PI_CODING_AGENT_DIR: this.agentDir },
+			model: this.modelLock,
+			args: [...(this.modelLock ? ["--models", this.modelLock] : []), "--no-session"],
+			env: { PI_CODING_AGENT_DIR: this.agentDir, ...(this.modelLock ? { OMP_MODEL_LOCK: this.modelLock } : {}) },
 		});
 		try {
 			await client.start();
@@ -420,8 +422,14 @@ export class OpenChamberHost {
 			command: this.command,
 			ui: true,
 			cwd: info.directory,
-			args: ["--session", row.file, ...(hasDefinition ? ["--agent-definition", selectedAgent] : [])],
-			env: { PI_CODING_AGENT_DIR: this.agentDir },
+			model: this.modelLock,
+			args: [
+				...(this.modelLock ? ["--models", this.modelLock] : []),
+				"--session",
+				row.file,
+				...(hasDefinition ? ["--agent-definition", selectedAgent] : []),
+			],
+			env: { PI_CODING_AGENT_DIR: this.agentDir, ...(this.modelLock ? { OMP_MODEL_LOCK: this.modelLock } : {}) },
 		});
 		const live: LiveSession = { client, messages: [], busy: false, pending: new Map() };
 		client.onFailure((kind, poolMessage) => {
@@ -763,10 +771,16 @@ export class OpenChamberHost {
 			live.busy = true;
 			try {
 				live.messages = await this.#transcript(id);
-				if (model) {
-					await live.client.setModel(model.providerID, model.modelID);
+				const selectedModel = this.modelLock
+					? {
+							providerID: this.modelLock.slice(0, this.modelLock.indexOf("/")),
+							modelID: this.modelLock.slice(this.modelLock.indexOf("/") + 1),
+						}
+					: model;
+				if (selectedModel) {
+					await live.client.setModel(selectedModel.providerID, selectedModel.modelID);
 					const info = this.get(id);
-					info.model = { providerID: model.providerID, id: model.modelID };
+					info.model = { providerID: selectedModel.providerID, id: selectedModel.modelID };
 					this.#save(info);
 				}
 				if (requestID) this.#db.run("INSERT INTO requests VALUES(?,?)", [requestID, id]);

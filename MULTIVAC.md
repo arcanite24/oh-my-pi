@@ -43,6 +43,12 @@ hard limits. Disable OpenCode's own Use balance setting for subscription-only
 accounts: cached usage cannot prevent an in-flight request crossing a limit.
 Explicit CLI/config key overrides retain upstream precedence and bypass pooling.
 
+The supervised browser backend polls the OpenCode Go pool every minute even
+when no browser is connected. Normal cache expiry keeps upstream requests near
+five-minute intervals, records each fresh 5-hour/weekly/monthly snapshot in
+SQLite history, and shares it with CLI processes. The dashboard continues to
+update every 30 seconds; its Refresh usage action explicitly bypasses the cache.
+
 ## Browser adapter implementation notes
 
 The private `/omp/agent-definition` endpoint supports GET, PUT and DELETE with
@@ -59,6 +65,8 @@ It requires OPENCODE_SERVER_PASSWORD with at least 32 characters. OMP_WEB_PORT
 defaults to 4097; OMP_EXECUTABLE selects a compiled CLI, otherwise the source CLI
 runs under the same Bun executable. OMP_WEB_DATA_DIR and OMP_WEB_AUTH_DB allow
 isolated development state. Never point test instances at the live profile.
+OMP_WEB_MODEL_LOCK restricts the browser server and every RPC worker it launches
+to one exact `provider/model`, including subagents, advisors, utilities, and retries.
 
 OpenChamber connects through its existing external-server connection. Unsupported
 routes return 501 while the port is in progress, rather than reporting empty success.

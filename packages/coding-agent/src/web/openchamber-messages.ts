@@ -10,6 +10,19 @@ export interface BrowserMessage {
 	parts: Part[];
 }
 
+const GENERIC_PROVIDER_ERROR =
+	"Provider request failed. Check credential pool availability and the server diagnostics.";
+
+function browserSafeProviderError(message?: string): string {
+	if (!message?.startsWith("Credential pool unavailable:")) return GENERIC_PROVIDER_ERROR;
+	const windows = ["rolling-5h", "weekly", "monthly"].filter(window => message.includes(window));
+	const reset = /Earliest reset: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\./.exec(message)?.[1];
+	return (
+		`Credential pool unavailable${windows.length ? ` (${windows.join(", ")})` : ""}.` +
+		(reset ? ` Earliest reset: ${reset}.` : " Refresh usage or update pool settings.")
+	);
+}
+
 /** Stable ids across streaming refreshes and persisted transcript reads. */
 export function browserMessageId(message: AgentMessage, occurrence: number): string {
 	return `msg_${message.timestamp.toString(16)}_${message.role}_${occurrence}`;
@@ -143,8 +156,7 @@ export function browserMessages(
 										error: {
 											name: "UnknownError" as const,
 											data: {
-												message:
-													"Provider request failed. Check credential pool availability and the server diagnostics.",
+												message: browserSafeProviderError(message.errorMessage),
 											},
 										},
 									}

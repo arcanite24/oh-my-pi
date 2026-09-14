@@ -17,6 +17,7 @@ const runtime = await startOpenChamberServer({
 	dataDir: process.env.OMP_WEB_DATA_DIR,
 	authDbPath: process.env.OMP_WEB_AUTH_DB,
 	browserOrigin: process.env.OMP_WEB_BROWSER_ORIGIN,
+	modelLock: process.env.OMP_WEB_MODEL_LOCK,
 	legacySessionGuard: process.env.OMP_WEB_LEGACY_GUARD
 		? parseLegacySessionGuard(JSON.parse(process.env.OMP_WEB_LEGACY_GUARD))
 		: undefined,

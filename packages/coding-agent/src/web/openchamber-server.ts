@@ -7,7 +7,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { CredentialPoolExhaustedError } from "@oh-my-pi/pi-ai/auth/credential-pool";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { getAgentDbPath, getAgentDir, getModelDbPath, isRecord, withFileLock } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, getModelDbPath, isRecord, logger, withFileLock } from "@oh-my-pi/pi-utils";
 import type { Provider } from "@opencode-ai/sdk/v2";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -29,7 +29,10 @@ export interface OpenChamberServerOptions {
 	authDbPath?: string;
 	browserOrigin?: string;
 	legacySessionGuard?: LegacySessionGuard;
+	modelLock?: string;
 }
+
+const CREDENTIAL_POOL_TRACKING_INTERVAL_MS = 60_000;
 
 function field(body: Record<string, unknown>, name: string, optional = false): string | undefined {
 	const value = body[name];
@@ -116,13 +119,27 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 	const models = new ModelRegistry(auth, path.join(dataDir, "models.yml"), {
 		settings: nativeSettings,
 		cacheDbPath: getModelDbPath(dataDir),
+		modelLock: options.modelLock,
 	});
 	await models.refresh("offline");
+	let trackingUsage = false;
+	const trackUsage = async (): Promise<void> => {
+		if (trackingUsage) return;
+		trackingUsage = true;
+		try {
+			await auth.getCredentialPool("opencode-go");
+		} catch (error) {
+			logger.debug("OpenCode Go background usage tracking failed", { error: String(error) });
+		} finally {
+			trackingUsage = false;
+		}
+	};
 	const host = new OpenChamberHost(
 		options.command,
 		path.join(dataDir, "openchamber.db"),
 		dataDir,
 		options.legacySessionGuard,
+		options.modelLock,
 	);
 	const initialDirectory = process.cwd();
 	const providers = (): Provider[] => {
@@ -436,6 +453,8 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 				if (route === "/omp/pool") {
 					const provider = url.searchParams.get("provider") ?? "opencode-go";
 					if (request.method === "PUT") auth.setCredentialPoolSettings(provider, await requestBody(request));
+					if (request.method === "GET" && url.searchParams.get("refresh") === "true")
+						await auth.invalidateUsageCache(provider, request.signal);
 					return Response.json(await auth.getCredentialPool(provider));
 				}
 				const providerSource = /^\/omp\/provider\/([^/]+)\/source$/.exec(route);
@@ -718,10 +737,14 @@ export async function startOpenChamberServer(options: OpenChamberServerOptions) 
 			}
 		},
 	});
+	void trackUsage();
+	const usageTrackingTimer = setInterval(() => void trackUsage(), CREDENTIAL_POOL_TRACKING_INTERVAL_MS);
+	usageTrackingTimer.unref();
 	return {
 		server,
 		host,
 		async close() {
+			clearInterval(usageTrackingTimer);
 			server.stop(true);
 			mcpOAuth.close();
 			await host.close();
